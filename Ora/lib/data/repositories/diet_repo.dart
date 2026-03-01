@@ -20,6 +20,13 @@ class DietRepo {
     Map<String, double>? micros,
     String? notes,
     String? imagePath,
+    String? barcode,
+    String? foodSource,
+    String? foodSourceId,
+    String? portionLabel,
+    double? portionGrams,
+    double? portionAmount,
+    String? portionUnit,
   }) async {
     final db = await _db.database;
     return db.insert('diet_entry', {
@@ -34,6 +41,13 @@ class DietRepo {
       'micros_json': micros == null ? null : jsonEncode(micros),
       'notes': notes,
       'image_path': imagePath,
+      'barcode': barcode,
+      'food_source': foodSource,
+      'food_source_id': foodSourceId,
+      'portion_label': portionLabel,
+      'portion_grams': portionGrams,
+      'portion_amount': portionAmount,
+      'portion_unit': portionUnit,
     });
   }
 
@@ -102,7 +116,8 @@ WHERE logged_at >= ? AND logged_at < ?
     );
   }
 
-  Future<Map<String, double>> getMicrosForRange(DateTime start, DateTime end) async {
+  Future<Map<String, double>> getMicrosForRange(
+      DateTime start, DateTime end) async {
     final db = await _db.database;
     final rows = await db.query(
       'diet_entry',
@@ -121,7 +136,8 @@ WHERE logged_at >= ? AND logged_at < ?
     return totals;
   }
 
-  Future<List<DietDaySummary>> getDailySummaries(DateTime startDay, int days) async {
+  Future<List<DietDaySummary>> getDailySummaries(
+      DateTime startDay, int days) async {
     final db = await _db.database;
     final start = DateTime(startDay.year, startDay.month, startDay.day);
     final end = start.add(Duration(days: days));
@@ -162,6 +178,22 @@ ORDER BY day DESC
     return rows.map(_fromRow).toList();
   }
 
+  Future<List<DietEntry>> getEntriesForBarcodeOnDay({
+    required String barcode,
+    required DateTime day,
+  }) async {
+    final db = await _db.database;
+    final start = DateTime(day.year, day.month, day.day);
+    final end = start.add(const Duration(days: 1));
+    final rows = await db.query(
+      'diet_entry',
+      where: 'barcode = ? AND logged_at >= ? AND logged_at < ?',
+      whereArgs: [barcode, start.toIso8601String(), end.toIso8601String()],
+      orderBy: 'logged_at DESC',
+    );
+    return rows.map(_fromRow).toList();
+  }
+
   Future<void> updateEntry({
     required int id,
     String? mealName,
@@ -174,6 +206,13 @@ ORDER BY day DESC
     Map<String, double>? micros,
     String? notes,
     String? imagePath,
+    String? barcode,
+    String? foodSource,
+    String? foodSourceId,
+    String? portionLabel,
+    double? portionGrams,
+    double? portionAmount,
+    String? portionUnit,
   }) async {
     final db = await _db.database;
     await db.update(
@@ -189,6 +228,13 @@ ORDER BY day DESC
         if (micros != null) 'micros_json': jsonEncode(micros),
         if (notes != null) 'notes': notes,
         if (imagePath != null) 'image_path': imagePath,
+        if (barcode != null) 'barcode': barcode,
+        if (foodSource != null) 'food_source': foodSource,
+        if (foodSourceId != null) 'food_source_id': foodSourceId,
+        if (portionLabel != null) 'portion_label': portionLabel,
+        if (portionGrams != null) 'portion_grams': portionGrams,
+        if (portionAmount != null) 'portion_amount': portionAmount,
+        if (portionUnit != null) 'portion_unit': portionUnit,
       },
       where: 'id = ?',
       whereArgs: [id],
@@ -214,6 +260,13 @@ ORDER BY day DESC
       micros: _decodeMicros(row['micros_json'] as String?),
       notes: row['notes'] as String?,
       imagePath: row['image_path'] as String?,
+      barcode: row['barcode'] as String?,
+      foodSource: row['food_source'] as String?,
+      foodSourceId: row['food_source_id'] as String?,
+      portionLabel: row['portion_label'] as String?,
+      portionGrams: _asDouble(row['portion_grams']),
+      portionAmount: _asDouble(row['portion_amount']),
+      portionUnit: row['portion_unit'] as String?,
     );
   }
 

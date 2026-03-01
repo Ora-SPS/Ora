@@ -1,5 +1,5 @@
 const dbName = 'ora.db';
-const dbVersion = 8;
+const dbVersion = 9;
 
 const createTableExercise = '''
 CREATE TABLE exercise(
@@ -162,7 +162,14 @@ CREATE TABLE diet_entry(
   sodium_mg REAL,
   micros_json TEXT,
   notes TEXT,
-  image_path TEXT
+  image_path TEXT,
+  barcode TEXT,
+  food_source TEXT,
+  food_source_id TEXT,
+  portion_label TEXT,
+  portion_grams REAL,
+  portion_amount REAL,
+  portion_unit TEXT
 );
 ''';
 
@@ -176,9 +183,42 @@ CREATE TABLE appearance_entry(
 );
 ''';
 
+const createTableFoodLookupCache = '''
+CREATE TABLE food_lookup_cache(
+  cache_key TEXT PRIMARY KEY,
+  cache_type TEXT NOT NULL,
+  query_text TEXT NOT NULL,
+  payload_json TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+''';
+
+const createTableFoodCustomOverride = '''
+CREATE TABLE food_custom_override(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  lookup_key TEXT NOT NULL UNIQUE,
+  normalized_name TEXT NOT NULL,
+  brand_name_normalized TEXT,
+  display_name TEXT NOT NULL,
+  barcode TEXT,
+  payload_json TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+''';
+
 const createIndexes = [
   'CREATE INDEX idx_exercise_alias_norm ON exercise_alias(alias_normalized);',
   'CREATE INDEX idx_set_entry_session_created ON set_entry(session_exercise_id, created_at);',
   'CREATE INDEX idx_session_exercise_exercise ON session_exercise(exercise_id);',
   'CREATE INDEX idx_workout_session_started ON workout_session(started_at);',
+];
+
+const createFoodIndexes = [
+  'CREATE INDEX idx_diet_entry_barcode_logged_at ON diet_entry(barcode, logged_at);',
+  'CREATE INDEX idx_food_lookup_cache_expires ON food_lookup_cache(expires_at);',
+  'CREATE INDEX idx_food_custom_override_name ON food_custom_override(normalized_name);',
+  'CREATE INDEX idx_food_custom_override_barcode ON food_custom_override(barcode);',
 ];
