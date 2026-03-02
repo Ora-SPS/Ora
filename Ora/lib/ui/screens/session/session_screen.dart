@@ -39,6 +39,40 @@ class SessionScreen extends StatefulWidget {
   final SessionContext contextData;
   final bool isEditing;
 
+  static Route<void> route({
+    required SessionContext contextData,
+    bool isEditing = false,
+  }) {
+    if (isEditing) {
+      return MaterialPageRoute(
+        builder: (_) =>
+            SessionScreen(contextData: contextData, isEditing: isEditing),
+      );
+    }
+    return PageRouteBuilder<void>(
+      opaque: false,
+      barrierColor: Colors.transparent,
+      transitionDuration: const Duration(milliseconds: 260),
+      reverseTransitionDuration: const Duration(milliseconds: 220),
+      pageBuilder: (_, __, ___) =>
+          SessionScreen(contextData: contextData, isEditing: isEditing),
+      transitionsBuilder: (context, animation, secondaryAnimation, child) {
+        final curved = CurvedAnimation(
+          parent: animation,
+          curve: Curves.easeOutCubic,
+          reverseCurve: Curves.easeInCubic,
+        );
+        return SlideTransition(
+          position: Tween<Offset>(
+            begin: const Offset(0, 1),
+            end: Offset.zero,
+          ).animate(curved),
+          child: child,
+        );
+      },
+    );
+  }
+
   @override
   State<SessionScreen> createState() => _SessionScreenState();
 }
@@ -69,6 +103,43 @@ class _DraftSet {
     _isDisposed = true;
     weight.dispose();
     reps.dispose();
+  }
+}
+
+class _DraftSetSnapshot {
+  const _DraftSetSnapshot({
+    required this.repsHint,
+    required this.weightText,
+    required this.repsText,
+    required this.restSeconds,
+    required this.targetSetIndex,
+  });
+
+  factory _DraftSetSnapshot.fromDraft(_DraftSet draft) {
+    return _DraftSetSnapshot(
+      repsHint: draft.repsHint,
+      weightText: draft.weight.text,
+      repsText: draft.reps.text,
+      restSeconds: draft.restSeconds,
+      targetSetIndex: draft.targetSetIndex,
+    );
+  }
+
+  final String? repsHint;
+  final String weightText;
+  final String repsText;
+  final int? restSeconds;
+  final int? targetSetIndex;
+
+  _DraftSet toDraftSet() {
+    final draft = _DraftSet(
+      repsHint: repsHint,
+      restSeconds: restSeconds,
+      targetSetIndex: targetSetIndex,
+    );
+    draft.weight.text = weightText;
+    draft.reps.text = repsText;
+    return draft;
   }
 }
 
@@ -350,6 +421,11 @@ class _SessionScreenState extends State<SessionScreen> {
   final Map<int, String> _inlineDebugSnapshot = {};
   final Map<int, int> _restSecondsByExerciseId = {};
   final Set<int> _completedRestSetIds = <int>{};
+  final Set<int> _pendingDeletedSetIds = <int>{};
+  final Map<int, int> _pendingDeleteTokenBySetId = <int, int>{};
+  final Set<_DraftSet> _pendingDeletedDrafts = <_DraftSet>{};
+  final Map<_DraftSet, int> _pendingDeleteTokenByDraft = <_DraftSet, int>{};
+  int _pendingDeleteNonce = 0;
   Timer? _inlineRestTicker;
   PersistentBottomSheetController? _numberPadSheetController;
   Completer<_NumberPadResult?>? _numberPadResultCompleter;
@@ -360,17 +436,25 @@ class _SessionScreenState extends State<SessionScreen> {
   bool _numberPadReplacePending = false;
   bool _numberPadDiscardChanges = false;
   String Function(String value)? _numberPadDisplayFormatter;
+  final TextEditingController _inlineEditDisplayController =
+      TextEditingController();
+  final FocusNode _inlineEditDisplayFocusNode = FocusNode();
   DateTime _inlineRestNow = DateTime.now();
   int? _lastObservedInlineRestSetId;
   String? _activeNumberPadFieldKey;
   String _activeNumberPadValue = '';
   DateTime? _sessionStartedAt;
   DateTime? _sessionEndedAt;
+  String? _sessionCustomTitle;
   String? _sessionProgramName;
   String? _sessionDayName;
   bool _listening = false;
   String? _voicePartial;
   final Map<int, List<_DraftSet>> _draftSetsByExerciseId = {};
+  final ScrollController _scrollController = ScrollController();
+  final GlobalKey _summaryCardKey = GlobalKey();
+  final TextEditingController _sessionTitleController = TextEditingController();
+  final FocusNode _sessionTitleFocusNode = FocusNode();
 
   _PendingLogSet? _pending;
   LastLoggedSet? _lastLogged;
@@ -398,6 +482,12 @@ class _SessionScreenState extends State<SessionScreen> {
   bool _sessionEnded = false;
   String _weightUnit = 'lb';
   bool _handlingPendingSessionVoice = false;
+  double _topHandleDragDistance = 0;
+  bool _showFloatingSessionTimer = false;
+  bool _isHandleDragging = false;
+  bool _isHandleMinimizing = false;
+  bool _isEditingSessionTitle = false;
+  bool _isPersistingSessionTitle = false;
 
   @override
   void initState() {
@@ -454,7 +544,11 @@ class _SessionScreenState extends State<SessionScreen> {
         _inlineRestNow = now;
       });
     });
+    _scrollController.addListener(_handleSessionScroll);
+    _sessionTitleController.text = _sessionTitle();
+    _sessionTitleFocusNode.addListener(_handleSessionTitleFocusChange);
     WidgetsBinding.instance.addPostFrameCallback((_) {
+      _updateFloatingSessionTimerVisibility();
       _handlePendingSessionVoice();
     });
   }
@@ -478,6 +572,15 @@ class _SessionScreenState extends State<SessionScreen> {
     if (_sessionEnded && !widget.isEditing) {
       AppShellController.instance.setActiveSession(false);
     }
+    _sessionTitleFocusNode
+      ..removeListener(_handleSessionTitleFocusChange)
+      ..dispose();
+    _sessionTitleController.dispose();
+    _inlineEditDisplayFocusNode.dispose();
+    _inlineEditDisplayController.dispose();
+    _scrollController
+      ..removeListener(_handleSessionScroll)
+      ..dispose();
     super.dispose();
   }
 
@@ -503,6 +606,27 @@ class _SessionScreenState extends State<SessionScreen> {
     }
   }
 
+  void _handleSessionScroll() {
+    _updateFloatingSessionTimerVisibility();
+  }
+
+  void _updateFloatingSessionTimerVisibility() {
+    if (!mounted) return;
+    final summaryContext = _summaryCardKey.currentContext;
+    final renderObject = summaryContext?.findRenderObject();
+    if (renderObject is! RenderBox || !renderObject.attached) {
+      return;
+    }
+    final summaryTop = renderObject.localToGlobal(Offset.zero).dy;
+    final summaryBottom = summaryTop + renderObject.size.height;
+    final topEdge = MediaQuery.paddingOf(context).top + 8;
+    final shouldShow = summaryBottom <= topEdge;
+    if (shouldShow == _showFloatingSessionTimer) return;
+    setState(() {
+      _showFloatingSessionTimer = shouldShow;
+    });
+  }
+
   Future<void> _loadSessionHeader() async {
     final header =
         await _workoutRepo.getSessionHeader(widget.contextData.sessionId);
@@ -511,9 +635,89 @@ class _SessionScreenState extends State<SessionScreen> {
       _sessionStartedAt =
           DateTime.tryParse(header?['started_at'] as String? ?? '');
       _sessionEndedAt = DateTime.tryParse(header?['ended_at'] as String? ?? '');
+      _sessionCustomTitle = (header?['notes'] as String?)?.trim();
       _sessionProgramName = header?['program_name'] as String?;
       _sessionDayName = header?['day_name'] as String?;
+      _syncSessionTitleField();
     });
+  }
+
+  void _handleSessionTitleFocusChange() {
+    if (_sessionTitleFocusNode.hasFocus) {
+      if (!_isEditingSessionTitle && mounted) {
+        setState(() {
+          _isEditingSessionTitle = true;
+        });
+      }
+      return;
+    }
+    if (_isEditingSessionTitle && mounted) {
+      setState(() {
+        _isEditingSessionTitle = false;
+      });
+    }
+    unawaited(_persistSessionTitleFromField());
+  }
+
+  void _syncSessionTitleField() {
+    if (_sessionTitleFocusNode.hasFocus) return;
+    final displayTitle = _sessionTitle();
+    if (_sessionTitleController.text == displayTitle) return;
+    _sessionTitleController.value = TextEditingValue(
+      text: displayTitle,
+      selection: TextSelection.collapsed(offset: displayTitle.length),
+    );
+  }
+
+  void _beginSessionTitleEditing() {
+    if (_isEditingSessionTitle) return;
+    setState(() {
+      _isEditingSessionTitle = true;
+      _syncSessionTitleField();
+    });
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      _sessionTitleFocusNode.requestFocus();
+      _selectEntireSessionTitle();
+    });
+  }
+
+  void _selectEntireSessionTitle() {
+    final text = _sessionTitleController.text;
+    _sessionTitleController.selection = TextSelection(
+      baseOffset: 0,
+      extentOffset: text.length,
+    );
+  }
+
+  Future<void> _persistSessionTitleFromField() async {
+    if (_isPersistingSessionTitle) return;
+    final rawTitle = _sessionTitleController.text;
+    final trimmed = rawTitle.trim();
+    final currentCustom = _sessionCustomTitle?.trim();
+    final defaultTitle = _defaultSessionTitle();
+    final nextTitle =
+        trimmed.isEmpty || trimmed == defaultTitle ? null : trimmed;
+    if (nextTitle == currentCustom) {
+      if (mounted) {
+        _syncSessionTitleField();
+      }
+      return;
+    }
+    _isPersistingSessionTitle = true;
+    try {
+      await _workoutRepo.updateSessionNotes(
+        sessionId: widget.contextData.sessionId,
+        notes: nextTitle,
+      );
+      if (!mounted) return;
+      setState(() {
+        _sessionCustomTitle = nextTitle;
+        _syncSessionTitleField();
+      });
+    } finally {
+      _isPersistingSessionTitle = false;
+    }
   }
 
   Future<void> _seedInitialDraftSets() async {
@@ -548,14 +752,12 @@ class _SessionScreenState extends State<SessionScreen> {
     final defaultRestSeconds = _restSecondsForExercise(info);
     var nextSetIndex = 1;
     for (final block in ordered) {
-      final hint = _formatRepsHint(block.repsMin, block.repsMax);
-      final lowerBoundReps = block.repsMin ?? block.repsMax;
+      final repsPlaceholder = (block.repsMin ?? block.repsMax)?.toString();
       final count = block.setCount <= 0 ? 1 : block.setCount;
       for (var i = 0; i < count; i++) {
         drafts.add(
           _DraftSet(
-            repsHint: hint,
-            initialReps: lowerBoundReps,
+            repsHint: repsPlaceholder,
             restSeconds: defaultRestSeconds,
             targetSetIndex: nextSetIndex,
           ),
@@ -723,6 +925,151 @@ class _SessionScreenState extends State<SessionScreen> {
     return '${_formatSetWeight(weight)}$unitLabel × $reps';
   }
 
+  Map<String, Object?>? _previousRowForSet(
+    SessionExerciseInfo info, {
+    required int setNumber,
+  }) {
+    if (setNumber <= 0) return null;
+    final previousSets = _inlineSetCache[info.sessionExerciseId]?.previousSets;
+    if (previousSets == null || setNumber - 1 >= previousSets.length) {
+      return null;
+    }
+    return previousSets[setNumber - 1];
+  }
+
+  String _draftWeightPlaceholder(
+    SessionExerciseInfo info, {
+    required int setNumber,
+  }) {
+    final previousRow = _previousRowForSet(info, setNumber: setNumber);
+    final weight = previousRow?['weight_value'] as num?;
+    if (weight == null) return _weightUnit;
+    return _formatSetWeight(weight);
+  }
+
+  String _draftRepsPlaceholder(
+    SessionExerciseInfo info,
+    _DraftSet draft, {
+    required int setNumber,
+  }) {
+    final previousRow = _previousRowForSet(info, setNumber: setNumber);
+    final reps = previousRow?['reps'] as int?;
+    if (reps != null && reps > 0) return reps.toString();
+    final hint = draft.repsHint?.trim();
+    if (hint != null && hint.isNotEmpty) return hint;
+    return 'Reps';
+  }
+
+  double? _resolvedDraftWeight(
+    SessionExerciseInfo info,
+    _DraftSet draft, {
+    required int setNumber,
+  }) {
+    final typed = double.tryParse(draft.weight.text.trim());
+    if (typed != null) return typed;
+    return double.tryParse(
+      _draftWeightPlaceholder(info, setNumber: setNumber).trim(),
+    );
+  }
+
+  int? _resolvedDraftReps(
+    SessionExerciseInfo info,
+    _DraftSet draft, {
+    required int setNumber,
+  }) {
+    final typed = int.tryParse(draft.reps.text.trim());
+    if (typed != null && typed > 0) return typed;
+    final placeholder = _draftRepsPlaceholder(
+      info,
+      draft,
+      setNumber: setNumber,
+    );
+    final fallback = int.tryParse(placeholder.trim());
+    if (fallback == null || fallback <= 0) return null;
+    return fallback;
+  }
+
+  void _applyDraftPlaceholderDefaults(
+    SessionExerciseInfo info,
+    _DraftSet draft, {
+    required int setNumber,
+  }) {
+    if (draft.weight.text.trim().isEmpty) {
+      final fallbackWeight = _resolvedDraftWeight(
+        info,
+        draft,
+        setNumber: setNumber,
+      );
+      if (fallbackWeight != null) {
+        draft.weight.text = _formatSetWeight(fallbackWeight);
+      }
+    }
+    if (draft.reps.text.trim().isEmpty) {
+      final fallbackReps = _resolvedDraftReps(
+        info,
+        draft,
+        setNumber: setNumber,
+      );
+      if (fallbackReps != null) {
+        draft.reps.text = fallbackReps.toString();
+      }
+    }
+  }
+
+  String? _formatRpeHint(double? min, double? max) {
+    if (min == null && max == null) return null;
+    final start = min ?? max!;
+    final end = max ?? min!;
+    String formatValue(double value) {
+      return value == value.roundToDouble()
+          ? value.toStringAsFixed(0)
+          : value.toString();
+    }
+
+    if (start == end) return formatValue(start);
+    return '${formatValue(start)}-${formatValue(end)}';
+  }
+
+  String _setVariationLabel(String role) {
+    switch (role) {
+      case 'WARMUP':
+        return 'Warm-up Set';
+      case 'TOP':
+        return 'Top-Set';
+      case 'BACKOFF':
+        return 'Back-off Set';
+      case 'BACKOFF_PARTIALS':
+        return 'Back-off Partials';
+      default:
+        return role;
+    }
+  }
+
+  List<String> _planVariationSummaries(SessionExerciseInfo info) {
+    if (info.planBlocks.isEmpty) return const [];
+    final ordered = List<SetPlanBlock>.from(info.planBlocks)
+      ..sort((a, b) => a.orderIndex.compareTo(b.orderIndex));
+    final summaries = <String>[];
+    for (final block in ordered) {
+      final details = <String>[];
+      final repsLabel = _formatRepsHint(block.repsMin, block.repsMax);
+      final rpeLabel = _formatRpeHint(block.targetRpeMin, block.targetRpeMax);
+      if (repsLabel != null) {
+        details.add('Reps $repsLabel');
+      }
+      if (rpeLabel != null) {
+        details.add('RPE $rpeLabel');
+      }
+      if (details.isEmpty) continue;
+      final setCount = block.setCount <= 0 ? 1 : block.setCount;
+      final countLabel = setCount == 1 ? '1 set' : '$setCount sets';
+      summaries.add(
+        '${_setVariationLabel(block.role)} ($countLabel): ${details.join('  •  ')}',
+      );
+    }
+    return summaries;
+  }
+
   int? _planRestSeconds(SessionExerciseInfo info) {
     int? restMax;
     int? restMin;
@@ -805,15 +1152,49 @@ class _SessionScreenState extends State<SessionScreen> {
     return (hours * 3600) + (minutes * 60) + seconds;
   }
 
-  bool get _showInlineEditCaret =>
-      (_inlineRestNow.millisecondsSinceEpoch ~/ 500).isEven;
+  Widget _buildInlineEditingField({
+    required TextStyle? style,
+    required Color cursorColor,
+    TextAlign textAlign = TextAlign.center,
+    EdgeInsets scrollPadding = EdgeInsets.zero,
+  }) {
+    return IgnorePointer(
+      child: EditableText(
+        controller: _inlineEditDisplayController,
+        focusNode: _inlineEditDisplayFocusNode,
+        readOnly: true,
+        showCursor: true,
+        backgroundCursorColor: Colors.transparent,
+        selectionColor: Colors.transparent,
+        selectionControls: null,
+        rendererIgnoresPointer: true,
+        maxLines: 1,
+        textAlign: textAlign,
+        style: style ?? const TextStyle(),
+        cursorColor: cursorColor,
+        scrollPadding: scrollPadding,
+        keyboardType: TextInputType.none,
+      ),
+    );
+  }
 
-  String _inlineEditingLabel(String value) {
-    final caret = _showInlineEditCaret ? '|' : '';
-    if (value.isEmpty) {
-      return caret.isEmpty ? ' ' : caret;
-    }
-    return '$value$caret';
+  Widget _buildSelectedInlineLabel({
+    required String value,
+    required TextStyle? style,
+    required Color textColor,
+    required Color highlightColor,
+    TextAlign textAlign = TextAlign.center,
+  }) {
+    return Text(
+      value.isEmpty ? ' ' : value,
+      maxLines: 1,
+      overflow: TextOverflow.ellipsis,
+      textAlign: textAlign,
+      style: style?.copyWith(
+        color: textColor,
+        backgroundColor: highlightColor,
+      ),
+    );
   }
 
   Future<void> _bringFieldIntoView(BuildContext fieldContext) async {
@@ -841,6 +1222,37 @@ class _SessionScreenState extends State<SessionScreen> {
     setState(() {
       _activeNumberPadValue = _formatNumberPadDisplay(_numberPadRawValue);
     });
+    _syncInlineEditDisplayState();
+  }
+
+  void _syncInlineEditDisplayState() {
+    final fieldKey = _activeNumberPadFieldKey;
+    if (fieldKey == null) {
+      if (_inlineEditDisplayController.text.isNotEmpty ||
+          _inlineEditDisplayController.selection.baseOffset != 0 ||
+          _inlineEditDisplayController.selection.extentOffset != 0) {
+        _inlineEditDisplayController.value = const TextEditingValue();
+      }
+      if (_inlineEditDisplayFocusNode.hasFocus) {
+        _inlineEditDisplayFocusNode.unfocus();
+      }
+      return;
+    }
+    final value = _activeNumberPadValue;
+    final selection = TextSelection.collapsed(offset: value.length);
+    final nextValue = TextEditingValue(
+      text: value,
+      selection: selection,
+    );
+    if (_inlineEditDisplayController.value != nextValue) {
+      _inlineEditDisplayController.value = nextValue;
+    }
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || _activeNumberPadFieldKey != fieldKey) return;
+      if (!_inlineEditDisplayFocusNode.hasFocus) {
+        _inlineEditDisplayFocusNode.requestFocus();
+      }
+    });
   }
 
   void _configureNumberPadRequest({
@@ -864,6 +1276,7 @@ class _SessionScreenState extends State<SessionScreen> {
       _activeNumberPadFieldKey = fieldKey;
       _activeNumberPadValue = _formatNumberPadDisplay(_numberPadRawValue);
     });
+    _syncInlineEditDisplayState();
   }
 
   void _commitActiveNumberPad({
@@ -916,6 +1329,12 @@ class _SessionScreenState extends State<SessionScreen> {
   }
 
   void _backspaceNumberPad() {
+    if (_numberPadReplacePending) {
+      _numberPadRawValue = '';
+      _numberPadReplacePending = false;
+      _refreshNumberPadUi();
+      return;
+    }
     if (_numberPadRawValue.isEmpty) return;
     _numberPadRawValue =
         _numberPadRawValue.substring(0, _numberPadRawValue.length - 1);
@@ -927,6 +1346,41 @@ class _SessionScreenState extends State<SessionScreen> {
     _numberPadRawValue = '';
     _numberPadReplacePending = false;
     _refreshNumberPadUi();
+  }
+
+  bool _isDraftWeightFieldKey(String? fieldKey) {
+    return fieldKey != null && fieldKey.startsWith('draft-weight-');
+  }
+
+  bool _isDraftRepsFieldKey(String? fieldKey) {
+    return fieldKey != null && fieldKey.startsWith('draft-reps-');
+  }
+
+  void _confirmNumberPadEntry() {
+    final fieldKey = _activeNumberPadFieldKey;
+    final isDraftWeight = _isDraftWeightFieldKey(fieldKey);
+    final isDraftReps = _isDraftRepsFieldKey(fieldKey);
+    final keepSheetOpen = isDraftWeight || isDraftReps;
+    _commitActiveNumberPad(
+      closeSheet: !keepSheetOpen,
+      confirmed: true,
+    );
+  }
+
+  bool _hasValidDraftWeight(
+    SessionExerciseInfo info,
+    _DraftSet draft, {
+    required int setNumber,
+  }) {
+    return _resolvedDraftWeight(info, draft, setNumber: setNumber) != null;
+  }
+
+  bool _hasValidDraftReps(
+    SessionExerciseInfo info,
+    _DraftSet draft, {
+    required int setNumber,
+  }) {
+    return _resolvedDraftReps(info, draft, setNumber: setNumber) != null;
   }
 
   bool _isTimerCompleteForRow(
@@ -967,6 +1421,71 @@ class _SessionScreenState extends State<SessionScreen> {
     );
   }
 
+  void _scheduleDeleteSet(
+    Map<String, Object?> row,
+    SessionExerciseInfo info,
+  ) {
+    final id = row['id'] as int?;
+    if (id == null || _pendingDeletedSetIds.contains(id)) return;
+    final token = ++_pendingDeleteNonce;
+    _pendingDeletedSetIds.add(id);
+    _pendingDeleteTokenBySetId[id] = token;
+    if (mounted) {
+      setState(() {});
+    }
+    _showUndoSnackBar(
+      message: 'Set removed',
+      onUndo: () async {
+        if (_pendingDeleteTokenBySetId[id] != token) return;
+        _pendingDeleteTokenBySetId.remove(id);
+        _pendingDeletedSetIds.remove(id);
+        if (!mounted) return;
+        setState(() {});
+      },
+    );
+    unawaited(
+      Future<void>.delayed(const Duration(seconds: 3), () async {
+        if (_pendingDeleteTokenBySetId[id] != token) return;
+        await _deleteSet(id, info);
+        _pendingDeleteTokenBySetId.remove(id);
+        _pendingDeletedSetIds.remove(id);
+        if (!mounted) return;
+        setState(() {});
+      }),
+    );
+  }
+
+  void _scheduleRemoveDraftSet(
+    SessionExerciseInfo info,
+    _DraftSet draft,
+  ) {
+    if (_pendingDeletedDrafts.contains(draft)) return;
+    final token = ++_pendingDeleteNonce;
+    _pendingDeletedDrafts.add(draft);
+    _pendingDeleteTokenByDraft[draft] = token;
+    if (mounted) {
+      setState(() {});
+    }
+    _showUndoSnackBar(
+      message: 'Set removed',
+      onUndo: () async {
+        if (_pendingDeleteTokenByDraft[draft] != token) return;
+        _pendingDeleteTokenByDraft.remove(draft);
+        _pendingDeletedDrafts.remove(draft);
+        if (!mounted) return;
+        setState(() {});
+      },
+    );
+    unawaited(
+      Future<void>.delayed(const Duration(seconds: 3), () async {
+        if (_pendingDeleteTokenByDraft[draft] != token) return;
+        _removeDraftSet(info, draft);
+        if (!mounted) return;
+        setState(() {});
+      }),
+    );
+  }
+
   String _formatSessionTimer(Duration elapsed) {
     final totalSeconds = elapsed.inSeconds.clamp(0, 86400 * 7);
     final hours = totalSeconds ~/ 3600;
@@ -997,12 +1516,18 @@ class _SessionScreenState extends State<SessionScreen> {
     return '${months[value.month - 1]} ${value.day}, ${value.year}';
   }
 
-  String _sessionTitle() {
+  String _defaultSessionTitle() {
     final day = _sessionDayName?.trim();
     if (day != null && day.isNotEmpty) return day;
     final program = _sessionProgramName?.trim();
     if (program != null && program.isNotEmpty) return program;
     return 'Workout Session';
+  }
+
+  String _sessionTitle() {
+    final customTitle = _sessionCustomTitle?.trim();
+    if (customTitle != null && customTitle.isNotEmpty) return customTitle;
+    return _defaultSessionTitle();
   }
 
   String? _currentVoiceStatus() {
@@ -1092,11 +1617,27 @@ class _SessionScreenState extends State<SessionScreen> {
     String initialValue = '',
     bool allowDecimal = false,
     String Function(String value)? displayFormatter,
-    bool replaceOnFirstInput = false,
+    bool replaceOnFirstInput = true,
   }) async {
     if (_numberPadSheetController != null) {
       if (_activeNumberPadFieldKey == fieldKey) {
-        return null;
+        final completer = _numberPadResultCompleter;
+        if (completer != null && !completer.isCompleted) {
+          _numberPadReplacePending =
+              _numberPadReplacePending ? false : _numberPadRawValue.isNotEmpty;
+          _refreshNumberPadUi();
+          return null;
+        }
+        _configureNumberPadRequest(
+          title: title,
+          fieldKey: fieldKey,
+          initialValue: initialValue,
+          allowDecimal: allowDecimal,
+          displayFormatter: displayFormatter,
+          replaceOnFirstInput: replaceOnFirstInput,
+        );
+        _refreshNumberPadUi();
+        return _numberPadResultCompleter?.future;
       }
       _commitActiveNumberPad();
       _configureNumberPadRequest(
@@ -1275,10 +1816,7 @@ class _SessionScreenState extends State<SessionScreen> {
                                 ),
                                 keyButton(
                                   'OK',
-                                  onPressed: () => _commitActiveNumberPad(
-                                    closeSheet: true,
-                                    confirmed: true,
-                                  ),
+                                  onPressed: _confirmNumberPadEntry,
                                   backgroundColor: theme.colorScheme.primary,
                                   foregroundColor: theme.colorScheme.surface,
                                 ),
@@ -1328,6 +1866,7 @@ class _SessionScreenState extends State<SessionScreen> {
         _activeNumberPadFieldKey = null;
         _activeNumberPadValue = '';
       });
+      _syncInlineEditDisplayState();
     });
     return completer.future;
   }
@@ -1574,13 +2113,14 @@ class _SessionScreenState extends State<SessionScreen> {
       setState(() {});
       return;
     }
-    final reps = int.tryParse(draft.reps.text.trim());
-    if (reps != null && reps > 0) {
+    if (!mounted) return;
+    setState(() {});
+    if (_hasValidDraftReps(info, draft, setNumber: setNumber)) {
+      _numberPadSheetController?.close();
       await _commitDraftSet(info, draft, setNumber: setNumber);
       return;
     }
-    if (!mounted) return;
-    setState(() {});
+    await _editDraftReps(info, draft, setNumber: setNumber);
   }
 
   Future<void> _editDraftReps(
@@ -1600,6 +2140,9 @@ class _SessionScreenState extends State<SessionScreen> {
     if (reps == null || reps <= 0) {
       if (!mounted) return;
       setState(() {});
+      if (result.confirmed) {
+        await _editDraftReps(info, draft, setNumber: setNumber);
+      }
       return;
     }
     if (!result.confirmed) {
@@ -1607,6 +2150,11 @@ class _SessionScreenState extends State<SessionScreen> {
       setState(() {});
       return;
     }
+    if (!_hasValidDraftWeight(info, draft, setNumber: setNumber)) {
+      await _editDraftWeight(info, draft, setNumber: setNumber);
+      return;
+    }
+    _numberPadSheetController?.close();
     await _commitDraftSet(info, draft, setNumber: setNumber);
   }
 
@@ -1695,6 +2243,8 @@ class _SessionScreenState extends State<SessionScreen> {
     _DraftSet draft, {
     int? setNumber,
   }) async {
+    final slot = setNumber ?? draft.targetSetIndex ?? 1;
+    _applyDraftPlaceholderDefaults(info, draft, setNumber: slot);
     final reps = int.tryParse(draft.reps.text.trim());
     if (reps == null || reps <= 0) {
       _showMessage('Enter valid reps.');
@@ -1800,6 +2350,13 @@ class _SessionScreenState extends State<SessionScreen> {
     _pushSetDebug(summary);
   }
 
+  void _retainInlineMetrics({
+    required int totalSets,
+    required String volumeLabel,
+  }) {
+    // Reserved for future inline metrics consumers.
+  }
+
   Widget _buildLoggedRestRow(
     BuildContext context,
     SessionExerciseInfo info, {
@@ -1822,6 +2379,9 @@ class _SessionScreenState extends State<SessionScreen> {
     final textColor = isComplete ? completeAccent : accent;
     final fieldKey = 'logged-rest-$setId';
     final isEditing = _activeNumberPadFieldKey == fieldKey;
+    final isSelected = isEditing &&
+        _numberPadReplacePending &&
+        _activeNumberPadValue.isNotEmpty;
     final row = Padding(
       padding: const EdgeInsets.fromLTRB(4, 6, 4, 10),
       child: Builder(
@@ -1839,22 +2399,47 @@ class _SessionScreenState extends State<SessionScreen> {
             borderRadius: BorderRadius.circular(12),
             child: SizedBox(
               height: 28,
-              child: _AnimatedRestPill(
-                isActive: isActive,
-                isComplete: isComplete,
-                restSeconds: restSeconds,
-                activeStartedAt: activeStartedAt,
-                activeDurationSeconds: activeDurationSeconds,
-                barColor: barColor,
-                barBorderColor: barBorderColor,
-                fillColor: fillColor,
-                textColor: textColor,
-                textStyle: theme.textTheme.titleSmall?.copyWith(
-                  fontWeight: FontWeight.w700,
-                ),
-                overrideLabel: isEditing
-                    ? _inlineEditingLabel(_activeNumberPadValue)
-                    : null,
+              child: Stack(
+                fit: StackFit.expand,
+                children: [
+                  _AnimatedRestPill(
+                    isActive: isActive,
+                    isComplete: isComplete,
+                    restSeconds: restSeconds,
+                    activeStartedAt: activeStartedAt,
+                    activeDurationSeconds: activeDurationSeconds,
+                    barColor: barColor,
+                    barBorderColor: barBorderColor,
+                    fillColor: fillColor,
+                    textColor: textColor,
+                    textStyle: theme.textTheme.titleSmall?.copyWith(
+                      fontWeight: FontWeight.w700,
+                    ),
+                    overrideLabel: isEditing ? '' : null,
+                  ),
+                  if (isEditing)
+                    Center(
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 8),
+                        child: isSelected
+                            ? _buildSelectedInlineLabel(
+                                value: _activeNumberPadValue,
+                                style: theme.textTheme.titleSmall?.copyWith(
+                                  fontWeight: FontWeight.w700,
+                                ),
+                                textColor: textColor,
+                                highlightColor: textColor.withOpacity(0.16),
+                              )
+                            : _buildInlineEditingField(
+                                style: theme.textTheme.titleSmall?.copyWith(
+                                  fontWeight: FontWeight.w700,
+                                  color: textColor,
+                                ),
+                                cursorColor: textColor,
+                              ),
+                      ),
+                    ),
+                ],
               ),
             ),
           ),
@@ -1902,6 +2487,9 @@ class _SessionScreenState extends State<SessionScreen> {
     final accent = theme.colorScheme.primary;
     final fieldKey = 'draft-rest-${info.sessionExerciseId}-${draft.hashCode}';
     final isEditing = _activeNumberPadFieldKey == fieldKey;
+    final isSelected = isEditing &&
+        _numberPadReplacePending &&
+        _activeNumberPadValue.isNotEmpty;
     final row = Padding(
       padding: const EdgeInsets.fromLTRB(4, 6, 4, 10),
       child: Builder(
@@ -1919,15 +2507,33 @@ class _SessionScreenState extends State<SessionScreen> {
               border: Border.all(color: accent.withOpacity(0.12)),
             ),
             alignment: Alignment.center,
-            child: Text(
-              isEditing
-                  ? _inlineEditingLabel(_activeNumberPadValue)
-                  : _formatRestShort(restSeconds),
-              style: theme.textTheme.titleSmall?.copyWith(
-                color: accent,
-                fontWeight: FontWeight.w700,
-              ),
-            ),
+            child: isEditing
+                ? Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 8),
+                    child: isSelected
+                        ? _buildSelectedInlineLabel(
+                            value: _activeNumberPadValue,
+                            style: theme.textTheme.titleSmall?.copyWith(
+                              fontWeight: FontWeight.w700,
+                            ),
+                            textColor: accent,
+                            highlightColor: accent.withOpacity(0.16),
+                          )
+                        : _buildInlineEditingField(
+                            style: theme.textTheme.titleSmall?.copyWith(
+                              color: accent,
+                              fontWeight: FontWeight.w700,
+                            ),
+                            cursorColor: accent,
+                          ),
+                  )
+                : Text(
+                    _formatRestShort(restSeconds),
+                    style: theme.textTheme.titleSmall?.copyWith(
+                      color: accent,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
           ),
         ),
       ),
@@ -1972,7 +2578,13 @@ class _SessionScreenState extends State<SessionScreen> {
     }
     _logInlineSnapshot(info, sets, previousSets, drafts, source: renderSource);
     final theme = Theme.of(context);
+    final totalSetCount = sets.length + drafts.length;
     final volumeLabel = volume == 0 ? '—' : volume.toStringAsFixed(0);
+    _retainInlineMetrics(
+      totalSets: totalSetCount,
+      volumeLabel: volumeLabel,
+    );
+    final variationSummaries = _planVariationSummaries(info);
     const setFlex = 12;
     const prevFlex = 28;
     const weightFlex = 18;
@@ -2012,6 +2624,7 @@ class _SessionScreenState extends State<SessionScreen> {
       Color? foregroundColor,
       Color? fillColor,
       Color? outlineColor,
+      Widget? child,
     }) {
       return Container(
         alignment: Alignment.center,
@@ -2021,14 +2634,28 @@ class _SessionScreenState extends State<SessionScreen> {
           borderRadius: BorderRadius.circular(12),
           border: Border.all(color: outlineColor ?? borderColor),
         ),
-        child: Text(
-          label,
-          maxLines: 1,
-          overflow: TextOverflow.ellipsis,
-          style: theme.textTheme.bodyMedium?.copyWith(
-            fontWeight: emphasize ? FontWeight.w700 : FontWeight.w600,
-            color: foregroundColor,
-          ),
+        child: child ??
+            Text(
+              label,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: theme.textTheme.bodyMedium?.copyWith(
+                fontWeight: emphasize ? FontWeight.w700 : FontWeight.w600,
+                color: foregroundColor,
+              ),
+            ),
+      );
+    }
+
+    Widget buildEditingChip({
+      required TextStyle? style,
+      required Color cursorColor,
+    }) {
+      return Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 2),
+        child: _buildInlineEditingField(
+          style: style,
+          cursorColor: cursorColor,
         ),
       );
     }
@@ -2044,9 +2671,11 @@ class _SessionScreenState extends State<SessionScreen> {
       final isEditing =
           fieldKey != null && _activeNumberPadFieldKey == fieldKey;
       final hasValue = label.trim().isNotEmpty;
-      final displayLabel = isEditing
-          ? _inlineEditingLabel(_activeNumberPadValue)
-          : (hasValue ? label : (placeholder ?? '—'));
+      final isSelected = isEditing &&
+          _numberPadReplacePending &&
+          _activeNumberPadValue.isNotEmpty;
+      final effectiveForeground =
+          foregroundColor ?? theme.colorScheme.onSurface;
       final chip = Builder(
         builder: (chipContext) => Material(
           color: Colors.transparent,
@@ -2058,11 +2687,33 @@ class _SessionScreenState extends State<SessionScreen> {
             },
             borderRadius: BorderRadius.circular(12),
             child: valueChip(
-              displayLabel,
+              hasValue ? label : (placeholder ?? '—'),
               emphasize: emphasize,
               foregroundColor: isEditing || hasValue
                   ? foregroundColor
                   : theme.colorScheme.onSurface.withOpacity(0.35),
+              child: isEditing
+                  ? (isSelected
+                      ? _buildSelectedInlineLabel(
+                          value: _activeNumberPadValue,
+                          style: theme.textTheme.bodyMedium?.copyWith(
+                            fontWeight:
+                                emphasize ? FontWeight.w700 : FontWeight.w600,
+                          ),
+                          textColor: effectiveForeground,
+                          highlightColor:
+                              theme.colorScheme.primary.withOpacity(0.2),
+                        )
+                      : buildEditingChip(
+                          style: theme.textTheme.bodyMedium?.copyWith(
+                            fontWeight:
+                                emphasize ? FontWeight.w700 : FontWeight.w600,
+                            color: effectiveForeground,
+                          ),
+                          cursorColor:
+                              foregroundColor ?? theme.colorScheme.primary,
+                        ))
+                  : null,
             ),
           ),
         ),
@@ -2155,81 +2806,87 @@ class _SessionScreenState extends State<SessionScreen> {
           (_completedRestSetIds.contains(rowId) ||
               justFinished ||
               _isTimerCompleteForRow(row, now: _inlineRestNow));
-      final rowContent = Column(
+      final rowContent = Container(
+        width: double.infinity,
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+        decoration: BoxDecoration(
+          color: completeRowFill,
+          borderRadius: BorderRadius.circular(18),
+          border: Border.all(color: completeBorderColor),
+        ),
+        child: Row(
+          children: [
+            flexCell(
+              flex: setFlex,
+              child: valueChip(
+                '$displayNumber',
+                emphasize: true,
+                foregroundColor: Colors.green.shade900,
+              ),
+            ),
+            const SizedBox(width: colGap),
+            flexCell(
+              flex: prevFlex,
+              child: Text(
+                _formatPrevious(previousRow),
+                textAlign: TextAlign.center,
+                style: theme.textTheme.bodyMedium?.copyWith(
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ),
+            const SizedBox(width: colGap),
+            flexCell(
+              flex: weightFlex,
+              child: editableValueChip(
+                label: _formatSetWeight(row['weight_value'] as num?),
+                onTap: () => _editLoggedSetWeight(
+                  info,
+                  setId: rowId!,
+                  currentWeight: row['weight_value'] as num?,
+                ),
+                fieldKey: rowId == null ? null : 'logged-weight-$rowId',
+                placeholder: '—',
+                foregroundColor: Colors.green.shade900,
+              ),
+            ),
+            const SizedBox(width: colGap),
+            flexCell(
+              flex: repsFlex,
+              child: editableValueChip(
+                label: (row['reps'] as int?)?.toString() ?? '',
+                onTap: () => _editLoggedSetReps(
+                  info,
+                  setId: rowId!,
+                  currentReps: row['reps'] as int?,
+                ),
+                fieldKey: rowId == null ? null : 'logged-reps-$rowId',
+                placeholder: '—',
+                foregroundColor: Colors.green.shade900,
+              ),
+            ),
+            const SizedBox(width: colGap),
+            flexCell(
+              flex: checkFlex,
+              child: actionChip(
+                icon: Icons.undo_rounded,
+                color: Colors.green.shade700,
+                onPressed: () => _undoCompletedSet(info, row),
+                tooltip: 'Mark incomplete',
+              ),
+            ),
+          ],
+        ),
+      );
+      final isPendingDelete =
+          rowId != null && _pendingDeletedSetIds.contains(rowId);
+      if (isPendingDelete) {
+        return const SizedBox.shrink();
+      }
+      final combinedContent = Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Container(
-            width: double.infinity,
-            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
-            decoration: BoxDecoration(
-              color: completeRowFill,
-              borderRadius: BorderRadius.circular(18),
-              border: Border.all(color: completeBorderColor),
-            ),
-            child: Row(
-              children: [
-                flexCell(
-                  flex: setFlex,
-                  child: valueChip(
-                    '$displayNumber',
-                    emphasize: true,
-                    foregroundColor: Colors.green.shade900,
-                  ),
-                ),
-                const SizedBox(width: colGap),
-                flexCell(
-                  flex: prevFlex,
-                  child: Text(
-                    _formatPrevious(previousRow),
-                    textAlign: TextAlign.center,
-                    style: theme.textTheme.bodyMedium?.copyWith(
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                ),
-                const SizedBox(width: colGap),
-                flexCell(
-                  flex: weightFlex,
-                  child: editableValueChip(
-                    label: _formatSetWeight(row['weight_value'] as num?),
-                    onTap: () => _editLoggedSetWeight(
-                      info,
-                      setId: rowId!,
-                      currentWeight: row['weight_value'] as num?,
-                    ),
-                    fieldKey: rowId == null ? null : 'logged-weight-$rowId',
-                    placeholder: '—',
-                    foregroundColor: Colors.green.shade900,
-                  ),
-                ),
-                const SizedBox(width: colGap),
-                flexCell(
-                  flex: repsFlex,
-                  child: editableValueChip(
-                    label: (row['reps'] as int?)?.toString() ?? '',
-                    onTap: () => _editLoggedSetReps(
-                      info,
-                      setId: rowId!,
-                      currentReps: row['reps'] as int?,
-                    ),
-                    fieldKey: rowId == null ? null : 'logged-reps-$rowId',
-                    placeholder: '—',
-                    foregroundColor: Colors.green.shade900,
-                  ),
-                ),
-                const SizedBox(width: colGap),
-                flexCell(
-                  flex: checkFlex,
-                  child: actionChip(
-                    icon: Icons.undo_rounded,
-                    color: Colors.green.shade700,
-                    onPressed: () => _undoCompletedSet(info, row),
-                    tooltip: 'Mark incomplete',
-                  ),
-                ),
-              ],
-            ),
-          ),
+          rowContent,
           if (rowId != null && restSecondsActual > 0)
             _buildLoggedRestRow(
               context,
@@ -2243,7 +2900,9 @@ class _SessionScreenState extends State<SessionScreen> {
             ),
         ],
       );
-      if (rowId == null) return rowContent;
+      if (rowId == null) {
+        return combinedContent;
+      }
       return Dismissible(
         key: ValueKey('set-$rowId'),
         direction: DismissDirection.startToEnd,
@@ -2264,8 +2923,8 @@ class _SessionScreenState extends State<SessionScreen> {
           ),
           child: const Icon(Icons.delete_outline),
         ),
-        onDismissed: (_) => _deleteSet(rowId, info),
-        child: rowContent,
+        onDismissed: (_) => _scheduleDeleteSet(row, info),
+        child: combinedContent,
       );
     }
 
@@ -2314,7 +2973,10 @@ class _SessionScreenState extends State<SessionScreen> {
                   _editDraftWeight(info, draft, setNumber: displayNumber);
                 },
                 fieldKey: weightFieldKey,
-                placeholder: _weightUnit,
+                placeholder: _draftWeightPlaceholder(
+                  info,
+                  setNumber: displayNumber,
+                ),
               ),
             ),
             const SizedBox(width: colGap),
@@ -2327,7 +2989,11 @@ class _SessionScreenState extends State<SessionScreen> {
                   _editDraftReps(info, draft, setNumber: displayNumber);
                 },
                 fieldKey: repsFieldKey,
-                placeholder: draft.repsHint ?? 'Reps',
+                placeholder: _draftRepsPlaceholder(
+                  info,
+                  draft,
+                  setNumber: displayNumber,
+                ),
               ),
             ),
             const SizedBox(width: colGap),
@@ -2342,10 +3008,7 @@ class _SessionScreenState extends State<SessionScreen> {
                         final activeFieldKey = _activeNumberPadFieldKey;
                         if (activeFieldKey == weightFieldKey ||
                             activeFieldKey == repsFieldKey) {
-                          _commitActiveNumberPad(
-                            closeSheet: true,
-                            confirmed: true,
-                          );
+                          _confirmNumberPadEntry();
                           return;
                         }
                         unawaited(
@@ -2361,6 +3024,17 @@ class _SessionScreenState extends State<SessionScreen> {
             ),
           ],
         ),
+      );
+      final isPendingDelete = _pendingDeletedDrafts.contains(draft);
+      if (isPendingDelete) {
+        return const SizedBox.shrink();
+      }
+      final combinedContent = Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          rowContent,
+          _buildDraftRestRow(context, info, draft),
+        ],
       );
       return Dismissible(
         key: ValueKey(
@@ -2384,14 +3058,8 @@ class _SessionScreenState extends State<SessionScreen> {
           ),
           child: const Icon(Icons.delete_outline),
         ),
-        onDismissed: (_) => _removeDraftSet(info, draft),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            rowContent,
-            _buildDraftRestRow(context, info, draft),
-          ],
-        ),
+        onDismissed: (_) => _scheduleRemoveDraftSet(info, draft),
+        child: combinedContent,
       );
     }
 
@@ -2465,26 +3133,32 @@ class _SessionScreenState extends State<SessionScreen> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(
-          '${sets.length + drafts.length} sets  •  Volume $volumeLabel',
-          style: summaryStyle,
-        ),
-        const SizedBox(height: 12),
-        Row(
-          children: [
-            headerCell('Set', setFlex),
-            const SizedBox(width: colGap),
-            headerCell('Previous', prevFlex),
-            const SizedBox(width: colGap),
-            headerCell(_weightUnit, weightFlex),
-            const SizedBox(width: colGap),
-            headerCell('Reps', repsFlex),
-            const SizedBox(width: colGap),
-            flexCell(
-              flex: checkFlex,
-              child: const SizedBox.shrink(),
-            ),
-          ],
+        if (variationSummaries.isNotEmpty) ...[
+          Text(
+            variationSummaries.join('\n'),
+            style: summaryStyle,
+          ),
+          const SizedBox(height: 12),
+        ] else
+          const SizedBox(height: 12),
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 8),
+          child: Row(
+            children: [
+              headerCell('Set', setFlex),
+              const SizedBox(width: colGap),
+              headerCell('Previous', prevFlex),
+              const SizedBox(width: colGap),
+              headerCell(_weightUnit, weightFlex),
+              const SizedBox(width: colGap),
+              headerCell('Reps', repsFlex),
+              const SizedBox(width: colGap),
+              flexCell(
+                flex: checkFlex,
+                child: const SizedBox.shrink(),
+              ),
+            ],
+          ),
         ),
         const SizedBox(height: 8),
         if (sets.isEmpty && drafts.isEmpty)
@@ -3405,6 +4079,8 @@ class _SessionScreenState extends State<SessionScreen> {
 
   Future<void> _deleteSet(int id, SessionExerciseInfo info) async {
     if (_isLoggingSet) return;
+    _pendingDeleteTokenBySetId.remove(id);
+    _pendingDeletedSetIds.remove(id);
     final beforeSets =
         await _workoutRepo.getSetsForSessionExercise(info.sessionExerciseId);
     _pushSetDebug(
@@ -3441,6 +4117,8 @@ class _SessionScreenState extends State<SessionScreen> {
   }
 
   void _removeDraftSet(SessionExerciseInfo info, _DraftSet draft) {
+    _pendingDeleteTokenByDraft.remove(draft);
+    _pendingDeletedDrafts.remove(draft);
     final list = _draftSetsByExerciseId[info.sessionExerciseId];
     if (list == null) return;
     _pushSetDebug('[draft-delete] ex=${info.sessionExerciseId}');
@@ -3719,6 +4397,44 @@ class _SessionScreenState extends State<SessionScreen> {
     );
   }
 
+  Future<void> _restoreDeletedExercise({
+    required SessionExerciseInfo info,
+    required int insertIndex,
+    required Map<String, Object?> sessionExerciseRow,
+    required List<Map<String, Object?>> setRows,
+    required List<_DraftSetSnapshot> draftSnapshots,
+    required Set<int> completedRestSetIds,
+  }) async {
+    final existingRow =
+        await _workoutRepo.getSessionExerciseById(info.sessionExerciseId);
+    if (existingRow != null) return;
+    await _workoutRepo.insertSessionExerciseWithId(sessionExerciseRow);
+    for (final row in setRows) {
+      await _workoutRepo.insertSetEntryWithId(row);
+    }
+    final restoreDrafts =
+        draftSnapshots.map((item) => item.toDraftSet()).toList();
+    final safeIndex = insertIndex.clamp(0, _sessionExercises.length);
+    _sessionExercises.insert(safeIndex, info);
+    _exerciseById[info.exerciseId] = info;
+    _sessionExerciseById[info.sessionExerciseId] = info;
+    if (restoreDrafts.isNotEmpty) {
+      _draftSetsByExerciseId[info.sessionExerciseId] = restoreDrafts;
+    }
+    _inlineSetCache.remove(info.sessionExerciseId);
+    _inlineSetFutures.remove(info.sessionExerciseId);
+    _inlineDebugSnapshot.remove(info.sessionExerciseId);
+    _completedRestSetIds.addAll(completedRestSetIds);
+    _currentDayExerciseNames =
+        _sessionExercises.map((entry) => entry.exerciseName).toList();
+    if (_lastExerciseInfo == null) {
+      _lastExerciseInfo = info;
+    }
+    _refreshInlineSetData(info);
+    if (!mounted) return;
+    setState(() {});
+  }
+
   Future<void> _deleteExerciseFromSession(SessionExerciseInfo info) async {
     final shouldDelete = await showDialog<bool>(
       context: context,
@@ -3740,8 +4456,23 @@ class _SessionScreenState extends State<SessionScreen> {
       },
     );
     if (shouldDelete != true) return;
+    final removedIndex = _sessionExercises.indexWhere(
+      (entry) => entry.sessionExerciseId == info.sessionExerciseId,
+    );
+    final sessionExerciseRow =
+        await _workoutRepo.getSessionExerciseById(info.sessionExerciseId);
+    if (sessionExerciseRow == null) return;
     final existingSets =
         await _workoutRepo.getSetsForSessionExercise(info.sessionExerciseId);
+    final completedRestSetIds = existingSets
+        .map((row) => row['id'] as int?)
+        .whereType<int>()
+        .where(_completedRestSetIds.contains)
+        .toSet();
+    final removedDrafts =
+        (_draftSetsByExerciseId[info.sessionExerciseId] ?? const <_DraftSet>[])
+            .map(_DraftSetSnapshot.fromDraft)
+            .toList();
     if (AppShellController.instance.restActiveExerciseId == info.exerciseId) {
       _completeInlineRest();
     }
@@ -3757,9 +4488,9 @@ class _SessionScreenState extends State<SessionScreen> {
     );
     _exerciseById.remove(info.exerciseId);
     _sessionExerciseById.remove(info.sessionExerciseId);
-    _draftSetsByExerciseId.remove(info.sessionExerciseId)?.forEach(
-          (draft) => draft.dispose(),
-        );
+    _draftSetsByExerciseId
+        .remove(info.sessionExerciseId)
+        ?.forEach((draft) => draft.dispose());
     _inlineSetCache.remove(info.sessionExerciseId);
     _inlineSetFutures.remove(info.sessionExerciseId);
     _inlineDebugSnapshot.remove(info.sessionExerciseId);
@@ -3771,6 +4502,17 @@ class _SessionScreenState extends State<SessionScreen> {
     }
     if (!mounted) return;
     setState(() {});
+    _showUndoSnackBar(
+      message: 'Exercise removed',
+      onUndo: () => _restoreDeletedExercise(
+        info: info,
+        insertIndex: removedIndex < 0 ? _sessionExercises.length : removedIndex,
+        sessionExerciseRow: sessionExerciseRow,
+        setRows: existingSets,
+        draftSnapshots: removedDrafts,
+        completedRestSetIds: completedRestSetIds,
+      ),
+    );
   }
 
   Future<void> _openExerciseHistory(SessionExerciseInfo info) async {
@@ -3784,17 +4526,85 @@ class _SessionScreenState extends State<SessionScreen> {
     );
   }
 
-  Future<void> _cancelSession() async {
+  Future<void> _minimizeSession() async {
     if (widget.isEditing) {
       if (!mounted) return;
       Navigator.of(context).pop();
       return;
     }
+    if (!mounted) return;
+    Navigator.of(context).pop();
+  }
+
+  Future<void> _confirmExitSession() async {
+    if (widget.isEditing) {
+      await _minimizeSession();
+      return;
+    }
+    final shouldCancel = await showDialog<bool>(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          title: const Text('Cancel Workout?'),
+          content: const Text(
+            'This deletes the current workout and all logged progress for this session.',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(false),
+              child: const Text('Keep'),
+            ),
+            ElevatedButton(
+              onPressed: () => Navigator.of(context).pop(true),
+              child: const Text('Cancel Workout'),
+            ),
+          ],
+        );
+      },
+    );
+    if (shouldCancel != true) return;
     await _workoutRepo.deleteSession(widget.contextData.sessionId);
     _sessionEnded = true;
     AppShellController.instance.setActiveSession(false);
     if (!mounted) return;
     Navigator.of(context).pop();
+  }
+
+  void _handleTopBarDragUpdate(DragUpdateDetails details) {
+    final delta = details.primaryDelta ?? 0;
+    if (_isHandleMinimizing) return;
+    final maxDrag = MediaQuery.sizeOf(context).height;
+    final nextValue = (_topHandleDragDistance + delta).clamp(0.0, maxDrag);
+    if (!mounted) return;
+    setState(() {
+      _isHandleDragging = true;
+      _topHandleDragDistance = nextValue;
+    });
+  }
+
+  void _handleTopBarDragEnd([DragEndDetails? details]) {
+    if (_isHandleMinimizing) return;
+    final screenHeight = MediaQuery.sizeOf(context).height;
+    final velocity = details?.primaryVelocity ?? 0;
+    final shouldMinimize = _topHandleDragDistance >= 120 || velocity >= 900;
+    if (shouldMinimize) {
+      setState(() {
+        _isHandleDragging = false;
+        _isHandleMinimizing = true;
+        _topHandleDragDistance = screenHeight;
+      });
+      unawaited(() async {
+        await Future<void>.delayed(const Duration(milliseconds: 220));
+        if (!mounted) return;
+        await _minimizeSession();
+      }());
+      return;
+    }
+    if (!mounted) return;
+    setState(() {
+      _isHandleDragging = false;
+      _topHandleDragDistance = 0;
+    });
   }
 
   Future<void> _finishSession() async {
@@ -3825,47 +4635,69 @@ class _SessionScreenState extends State<SessionScreen> {
     final theme = Theme.of(context);
     final surfaceColor = theme.colorScheme.surface.withOpacity(0.82);
     final borderColor = theme.colorScheme.onSurface.withOpacity(0.08);
-    return Row(
-      children: [
-        SizedBox(
-          width: 52,
-          height: 52,
-          child: DecoratedBox(
-            decoration: BoxDecoration(
-              color: surfaceColor,
-              borderRadius: BorderRadius.circular(16),
-              border: Border.all(color: borderColor),
-            ),
-            child: IconButton(
-              onPressed: _cancelSession,
-              icon: const Icon(Icons.close_rounded),
-              tooltip: widget.isEditing ? 'Close' : 'Cancel session',
-            ),
-          ),
-        ),
-        Expanded(
-          child: Center(
-            child: Container(
-              width: 56,
-              height: 6,
-              decoration: BoxDecoration(
-                color: theme.colorScheme.onSurface.withOpacity(0.18),
-                borderRadius: BorderRadius.circular(999),
+    return SizedBox(
+      height: 52,
+      child: Stack(
+        alignment: Alignment.center,
+        children: [
+          Align(
+            alignment: Alignment.centerLeft,
+            child: SizedBox(
+              width: 52,
+              height: 52,
+              child: DecoratedBox(
+                decoration: BoxDecoration(
+                  color: surfaceColor,
+                  borderRadius: BorderRadius.circular(16),
+                  border: Border.all(color: borderColor),
+                ),
+                child: IconButton(
+                  onPressed: _confirmExitSession,
+                  icon: const Icon(Icons.close_rounded),
+                  tooltip: widget.isEditing ? 'Close' : 'Cancel workout',
+                ),
               ),
             ),
           ),
-        ),
-        ElevatedButton(
-          onPressed: _finishSession,
-          style: ElevatedButton.styleFrom(
-            padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 14),
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(14),
+          Align(
+            alignment: Alignment.center,
+            child: GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onVerticalDragUpdate: _handleTopBarDragUpdate,
+              onVerticalDragEnd: _handleTopBarDragEnd,
+              onVerticalDragCancel: _handleTopBarDragEnd,
+              child: SizedBox(
+                width: 88,
+                height: 40,
+                child: Center(
+                  child: Container(
+                    width: 56,
+                    height: 6,
+                    decoration: BoxDecoration(
+                      color: theme.colorScheme.onSurface.withOpacity(0.18),
+                      borderRadius: BorderRadius.circular(999),
+                    ),
+                  ),
+                ),
+              ),
             ),
           ),
-          child: const Text('Finish'),
-        ),
-      ],
+          Align(
+            alignment: Alignment.centerRight,
+            child: ElevatedButton(
+              onPressed: _finishSession,
+              style: ElevatedButton.styleFrom(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 18, vertical: 14),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(14),
+                ),
+              ),
+              child: const Text('Finish'),
+            ),
+          ),
+        ],
+      ),
     );
   }
 
@@ -3909,6 +4741,7 @@ class _SessionScreenState extends State<SessionScreen> {
     final theme = Theme.of(context);
     final voiceStatus = _currentVoiceStatus();
     return Container(
+      key: _summaryCardKey,
       padding: const EdgeInsets.fromLTRB(18, 18, 18, 16),
       decoration: BoxDecoration(
         color: theme.colorScheme.surface.withOpacity(0.72),
@@ -3919,34 +4752,60 @@ class _SessionScreenState extends State<SessionScreen> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Row(
-            children: [
-              Expanded(
-                child: Text(
-                  _sessionTitle(),
-                  style: theme.textTheme.headlineSmall?.copyWith(
-                    fontWeight: FontWeight.w800,
+          Padding(
+            padding: const EdgeInsets.symmetric(vertical: 4),
+            child: _isEditingSessionTitle
+                ? Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 10,
+                      vertical: 6,
+                    ),
+                    decoration: BoxDecoration(
+                      color: theme.colorScheme.surface.withOpacity(0.58),
+                      borderRadius: BorderRadius.circular(14),
+                      border: Border.all(
+                        color: theme.colorScheme.primary.withOpacity(0.22),
+                      ),
+                    ),
+                    child: TextField(
+                      controller: _sessionTitleController,
+                      focusNode: _sessionTitleFocusNode,
+                      minLines: 1,
+                      maxLines: null,
+                      autofocus: true,
+                      keyboardType: TextInputType.multiline,
+                      textInputAction: TextInputAction.done,
+                      textCapitalization: TextCapitalization.words,
+                      cursorColor: theme.colorScheme.primary,
+                      onSubmitted: (_) {
+                        _sessionTitleFocusNode.unfocus();
+                      },
+                      onTapOutside: (_) {
+                        _sessionTitleFocusNode.unfocus();
+                      },
+                      decoration: const InputDecoration(
+                        isDense: true,
+                        border: InputBorder.none,
+                        contentPadding: EdgeInsets.zero,
+                      ),
+                      style: theme.textTheme.headlineSmall?.copyWith(
+                        fontWeight: FontWeight.w800,
+                      ),
+                      scrollPadding: const EdgeInsets.only(bottom: 140),
+                    ),
+                  )
+                : InkWell(
+                    borderRadius: BorderRadius.circular(12),
+                    onTap: _beginSessionTitleEditing,
+                    child: Text(
+                      _sessionTitle(),
+                      softWrap: true,
+                      style: theme.textTheme.headlineSmall?.copyWith(
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
                   ),
-                ),
-              ),
-              Container(
-                width: 40,
-                height: 40,
-                decoration: BoxDecoration(
-                  color: theme.colorScheme.primary.withOpacity(0.12),
-                  borderRadius: BorderRadius.circular(12),
-                ),
-                child: IconButton(
-                  onPressed: () {
-                    setState(() {
-                      _showVoiceDebug = !_showVoiceDebug;
-                    });
-                  },
-                  icon: const Icon(Icons.more_horiz_rounded, size: 20),
-                  tooltip: 'More',
-                ),
-              ),
-            ],
           ),
           const SizedBox(height: 12),
           Wrap(
@@ -3984,6 +4843,62 @@ class _SessionScreenState extends State<SessionScreen> {
             ),
           ],
         ],
+      ),
+    );
+  }
+
+  Widget _buildFloatingSessionTimer(
+    BuildContext context, {
+    required String sessionTimer,
+  }) {
+    final theme = Theme.of(context);
+    final topInset = MediaQuery.paddingOf(context).top;
+    return Positioned(
+      top: topInset + 12,
+      left: 0,
+      right: 0,
+      child: IgnorePointer(
+        child: Center(
+          child: AnimatedSlide(
+            duration: const Duration(milliseconds: 180),
+            curve: Curves.easeOutCubic,
+            offset: _showFloatingSessionTimer
+                ? Offset.zero
+                : const Offset(0, -0.35),
+            child: AnimatedOpacity(
+              duration: const Duration(milliseconds: 160),
+              opacity: _showFloatingSessionTimer ? 1 : 0,
+              child: Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                decoration: BoxDecoration(
+                  color: theme.colorScheme.surface.withOpacity(0.82),
+                  borderRadius: BorderRadius.circular(18),
+                  border: Border.all(
+                    color: theme.colorScheme.onSurface.withOpacity(0.08),
+                  ),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(
+                      Icons.schedule_rounded,
+                      size: 16,
+                      color: theme.colorScheme.onSurface.withOpacity(0.7),
+                    ),
+                    const SizedBox(width: 8),
+                    Text(
+                      sessionTimer,
+                      style: theme.textTheme.titleSmall?.copyWith(
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
       ),
     );
   }
@@ -4201,78 +5116,91 @@ class _SessionScreenState extends State<SessionScreen> {
         ? '0:00'
         : _formatSessionTimer(
             (endedAt ?? _inlineRestNow).difference(startedAt));
-    return TapRegionSurface(
-      child: Scaffold(
-        key: _scaffoldKey,
-        floatingActionButton: GestureDetector(
-          onLongPressStart: (_) => _startVoiceListening(),
-          onLongPressEnd: (_) => _stopVoiceListening(),
-          child: FloatingActionButton(
-            onPressed: _runVoice,
-            child: Icon(_listening ? Icons.mic : Icons.mic_none),
-          ),
+    final page = Scaffold(
+      key: _scaffoldKey,
+      floatingActionButton: GestureDetector(
+        onLongPressStart: (_) => _startVoiceListening(),
+        onLongPressEnd: (_) => _stopVoiceListening(),
+        child: FloatingActionButton(
+          onPressed: _runVoice,
+          child: Icon(_listening ? Icons.mic : Icons.mic_none),
         ),
-        body: Stack(
-          children: [
-            const GlassBackground(),
-            SafeArea(
-              child: ListView(
-                padding: const EdgeInsets.fromLTRB(16, 12, 16, 28),
-                children: [
-                  _buildSessionTopBar(context),
-                  const SizedBox(height: 18),
-                  _buildSessionSummaryCard(
-                    context,
-                    startedAt: startedAt,
-                    sessionTimer: sessionTimer,
-                  ),
-                  if (_sessionExercises.isNotEmpty) const SizedBox(height: 18),
-                  for (var i = 0; i < _sessionExercises.length; i++) ...[
-                    _buildExerciseCard(context, _sessionExercises[i]),
-                    if (i != _sessionExercises.length - 1)
-                      const SizedBox(height: 16),
-                  ],
-                  const SizedBox(height: 20),
-                  _buildAddExerciseButton(context),
-                  if (_showVoiceDebug) ...[
+      ),
+      body: Stack(
+        children: [
+          const GlassBackground(),
+          SafeArea(
+            child: ListView(
+              controller: _scrollController,
+              padding: const EdgeInsets.fromLTRB(16, 12, 16, 28),
+              children: [
+                _buildSessionTopBar(context),
+                const SizedBox(height: 18),
+                _buildSessionSummaryCard(
+                  context,
+                  startedAt: startedAt,
+                  sessionTimer: sessionTimer,
+                ),
+                if (_sessionExercises.isNotEmpty) const SizedBox(height: 18),
+                for (var i = 0; i < _sessionExercises.length; i++) ...[
+                  _buildExerciseCard(context, _sessionExercises[i]),
+                  if (i != _sessionExercises.length - 1)
                     const SizedBox(height: 16),
-                    GlassCard(
-                      padding: const EdgeInsets.all(12),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text('Transcript: ${_debugTranscript ?? '-'}'),
-                          const SizedBox(height: 6),
-                          Text('Rule: ${_debugRule ?? '-'}'),
-                          const SizedBox(height: 6),
-                          Text('LLM: ${_debugLlm ?? '-'}'),
-                          const SizedBox(height: 6),
-                          Text('Gemini: ${_debugGemini ?? '-'}'),
-                          const SizedBox(height: 6),
-                          Text('OpenAI: ${_debugOpenAi ?? '-'}'),
-                          const SizedBox(height: 6),
-                          Text('Cloud: ${_debugCloud ?? '-'}'),
-                          const SizedBox(height: 6),
-                          Text('Hints: ${_debugParts ?? '-'}'),
-                          const SizedBox(height: 6),
-                          Text('Decision: ${_debugDecision ?? '-'}'),
-                          const SizedBox(height: 6),
-                          Text('Resolved: ${_debugResolved ?? '-'}'),
-                          const SizedBox(height: 6),
-                          Text('LLM raw: ${_debugLlmRaw ?? '-'}'),
-                          const SizedBox(height: 6),
-                          Text('Gemini raw: ${_debugGeminiRaw ?? '-'}'),
-                          const SizedBox(height: 6),
-                          Text('OpenAI raw: ${_debugOpenAiRaw ?? '-'}'),
-                        ],
-                      ),
-                    ),
-                  ],
                 ],
-              ),
+                const SizedBox(height: 20),
+                _buildAddExerciseButton(context),
+                if (_showVoiceDebug) ...[
+                  const SizedBox(height: 16),
+                  GlassCard(
+                    padding: const EdgeInsets.all(12),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text('Transcript: ${_debugTranscript ?? '-'}'),
+                        const SizedBox(height: 6),
+                        Text('Rule: ${_debugRule ?? '-'}'),
+                        const SizedBox(height: 6),
+                        Text('LLM: ${_debugLlm ?? '-'}'),
+                        const SizedBox(height: 6),
+                        Text('Gemini: ${_debugGemini ?? '-'}'),
+                        const SizedBox(height: 6),
+                        Text('OpenAI: ${_debugOpenAi ?? '-'}'),
+                        const SizedBox(height: 6),
+                        Text('Cloud: ${_debugCloud ?? '-'}'),
+                        const SizedBox(height: 6),
+                        Text('Hints: ${_debugParts ?? '-'}'),
+                        const SizedBox(height: 6),
+                        Text('Decision: ${_debugDecision ?? '-'}'),
+                        const SizedBox(height: 6),
+                        Text('Resolved: ${_debugResolved ?? '-'}'),
+                        const SizedBox(height: 6),
+                        Text('LLM raw: ${_debugLlmRaw ?? '-'}'),
+                        const SizedBox(height: 6),
+                        Text('Gemini raw: ${_debugGeminiRaw ?? '-'}'),
+                        const SizedBox(height: 6),
+                        Text('OpenAI raw: ${_debugOpenAiRaw ?? '-'}'),
+                      ],
+                    ),
+                  ),
+                ],
+              ],
             ),
-          ],
-        ),
+          ),
+          _buildFloatingSessionTimer(
+            context,
+            sessionTimer: sessionTimer,
+          ),
+        ],
+      ),
+    );
+    return TapRegionSurface(
+      child: AnimatedContainer(
+        duration: _isHandleDragging
+            ? Duration.zero
+            : const Duration(milliseconds: 220),
+        curve: Curves.easeOutCubic,
+        transform: Matrix4.translationValues(0, _topHandleDragDistance, 0),
+        child: page,
       ),
     );
   }

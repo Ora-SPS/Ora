@@ -24,12 +24,17 @@ class ProgramRepo {
   Future<void> deleteProgram(int programId) async {
     final db = await _db.database;
     await db.transaction((txn) async {
-      await txn.update('workout_session', {
-        'program_id': null,
-        'program_day_id': null,
-      }, where: 'program_id = ?', whereArgs: [programId]);
+      await txn.update(
+          'workout_session',
+          {
+            'program_id': null,
+            'program_day_id': null,
+          },
+          where: 'program_id = ?',
+          whereArgs: [programId]);
 
-      final days = await txn.query('program_day', columns: ['id'], where: 'program_id = ?', whereArgs: [programId]);
+      final days = await txn.query('program_day',
+          columns: ['id'], where: 'program_id = ?', whereArgs: [programId]);
       for (final day in days) {
         final dayId = day['id'] as int;
         final exercises = await txn.query(
@@ -40,16 +45,20 @@ class ProgramRepo {
         );
         for (final ex in exercises) {
           final dayExerciseId = ex['id'] as int;
-          await txn.delete('set_plan_block', where: 'program_day_exercise_id = ?', whereArgs: [dayExerciseId]);
+          await txn.delete('set_plan_block',
+              where: 'program_day_exercise_id = ?', whereArgs: [dayExerciseId]);
         }
-        await txn.delete('program_day_exercise', where: 'program_day_id = ?', whereArgs: [dayId]);
+        await txn.delete('program_day_exercise',
+            where: 'program_day_id = ?', whereArgs: [dayId]);
       }
-      await txn.delete('program_day', where: 'program_id = ?', whereArgs: [programId]);
+      await txn.delete('program_day',
+          where: 'program_id = ?', whereArgs: [programId]);
       await txn.delete('program', where: 'id = ?', whereArgs: [programId]);
     });
   }
 
-  Future<void> updateProgram({required int id, required String name, String? notes}) async {
+  Future<void> updateProgram(
+      {required int id, required String name, String? notes}) async {
     final db = await _db.database;
     await db.update(
       'program',
@@ -83,7 +92,8 @@ class ProgramRepo {
     );
   }
 
-  Future<Map<String, Object?>?> getProgramDayByIndex({required int programId, required int dayIndex}) async {
+  Future<Map<String, Object?>?> getProgramDayByIndex(
+      {required int programId, required int dayIndex}) async {
     final db = await _db.database;
     final rows = await db.query(
       'program_day',
@@ -94,7 +104,10 @@ class ProgramRepo {
     return rows.isEmpty ? null : rows.first;
   }
 
-  Future<void> updateProgramDay({required int id, required String dayName}) async {
+  Future<void> updateProgramDay({
+    required int id,
+    required String dayName,
+  }) async {
     final db = await _db.database;
     await db.update(
       'program_day',
@@ -102,6 +115,55 @@ class ProgramRepo {
       where: 'id = ?',
       whereArgs: [id],
     );
+  }
+
+  Future<void> updateProgramDayOrder({
+    required int id,
+    required int dayIndex,
+  }) async {
+    final db = await _db.database;
+    await db.update(
+      'program_day',
+      {'day_index': dayIndex},
+      where: 'id = ?',
+      whereArgs: [id],
+    );
+  }
+
+  Future<void> deleteProgramDay(int programDayId) async {
+    final db = await _db.database;
+    await db.transaction((txn) async {
+      await txn.update(
+        'workout_session',
+        {'program_day_id': null},
+        where: 'program_day_id = ?',
+        whereArgs: [programDayId],
+      );
+      final exercises = await txn.query(
+        'program_day_exercise',
+        columns: ['id'],
+        where: 'program_day_id = ?',
+        whereArgs: [programDayId],
+      );
+      for (final exercise in exercises) {
+        final dayExerciseId = exercise['id'] as int;
+        await txn.delete(
+          'set_plan_block',
+          where: 'program_day_exercise_id = ?',
+          whereArgs: [dayExerciseId],
+        );
+      }
+      await txn.delete(
+        'program_day_exercise',
+        where: 'program_day_id = ?',
+        whereArgs: [programDayId],
+      );
+      await txn.delete(
+        'program_day',
+        where: 'id = ?',
+        whereArgs: [programDayId],
+      );
+    });
   }
 
   Future<int> addProgramDayExercise({
@@ -119,15 +181,34 @@ class ProgramRepo {
     });
   }
 
-  Future<List<Map<String, Object?>>> getProgramDayExerciseDetails(int programDayId) async {
+  Future<List<Map<String, Object?>>> getProgramDayExerciseDetails(
+      int programDayId) async {
     final db = await _db.database;
-    return db.rawQuery('''\nSELECT pde.id as program_day_exercise_id,\n       pde.exercise_id,\n       pde.order_index,\n       pde.notes,\n       e.canonical_name,\n       e.weight_mode_default\nFROM program_day_exercise pde\nJOIN exercise e ON e.id = pde.exercise_id\nWHERE pde.program_day_id = ?\nORDER BY pde.order_index ASC\n''', [programDayId]);
+    return db.rawQuery(
+        '''\nSELECT pde.id as program_day_exercise_id,\n       pde.exercise_id,\n       pde.order_index,\n       pde.notes,\n       e.canonical_name,\n       e.weight_mode_default\nFROM program_day_exercise pde\nJOIN exercise e ON e.id = pde.exercise_id\nWHERE pde.program_day_id = ?\nORDER BY pde.order_index ASC\n''',
+        [programDayId]);
   }
 
   Future<void> deleteProgramDayExercise(int programDayExerciseId) async {
     final db = await _db.database;
-    await db.delete('set_plan_block', where: 'program_day_exercise_id = ?', whereArgs: [programDayExerciseId]);
-    await db.delete('program_day_exercise', where: 'id = ?', whereArgs: [programDayExerciseId]);
+    await db.delete('set_plan_block',
+        where: 'program_day_exercise_id = ?',
+        whereArgs: [programDayExerciseId]);
+    await db.delete('program_day_exercise',
+        where: 'id = ?', whereArgs: [programDayExerciseId]);
+  }
+
+  Future<void> updateProgramDayExerciseOrder({
+    required int id,
+    required int orderIndex,
+  }) async {
+    final db = await _db.database;
+    await db.update(
+      'program_day_exercise',
+      {'order_index': orderIndex},
+      where: 'id = ?',
+      whereArgs: [id],
+    );
   }
 
   Future<int> addSetPlanBlock({
@@ -175,7 +256,8 @@ class ProgramRepo {
     });
   }
 
-  Future<List<Map<String, Object?>>> getSetPlanBlocks(int programDayExerciseId) async {
+  Future<List<Map<String, Object?>>> getSetPlanBlocks(
+      int programDayExerciseId) async {
     final db = await _db.database;
     return db.query(
       'set_plan_block',
@@ -185,10 +267,13 @@ class ProgramRepo {
     );
   }
 
-  Future<void> replaceSetPlanBlocks(int programDayExerciseId, List<Map<String, Object?>> blocks) async {
+  Future<void> replaceSetPlanBlocks(
+      int programDayExerciseId, List<Map<String, Object?>> blocks) async {
     final db = await _db.database;
     final batch = db.batch();
-    batch.delete('set_plan_block', where: 'program_day_exercise_id = ?', whereArgs: [programDayExerciseId]);
+    batch.delete('set_plan_block',
+        where: 'program_day_exercise_id = ?',
+        whereArgs: [programDayExerciseId]);
     for (final block in blocks) {
       batch.insert('set_plan_block', {
         'program_day_exercise_id': programDayExerciseId,
@@ -215,7 +300,121 @@ class ProgramRepo {
     await batch.commit(noResult: true);
   }
 
-  Future<List<Map<String, Object?>>> getProgramDayExercises(int programDayId) async {
+  Future<Map<String, Object?>> createProgramDaySnapshot(
+      int programDayId) async {
+    final db = await _db.database;
+    final dayRows = await db.query(
+      'program_day',
+      columns: ['day_name'],
+      where: 'id = ?',
+      whereArgs: [programDayId],
+      limit: 1,
+    );
+    if (dayRows.isEmpty) return {};
+    final exercises = await db.query(
+      'program_day_exercise',
+      where: 'program_day_id = ?',
+      whereArgs: [programDayId],
+      orderBy: 'order_index ASC',
+    );
+    final snapshotExercises = <Map<String, Object?>>[];
+    for (final rawExercise in exercises) {
+      final exercise = Map<String, Object?>.from(rawExercise);
+      final programDayExerciseId = exercise.remove('id') as int;
+      final blocks = await db.query(
+        'set_plan_block',
+        where: 'program_day_exercise_id = ?',
+        whereArgs: [programDayExerciseId],
+        orderBy: 'order_index ASC',
+      );
+      snapshotExercises.add({
+        ...exercise,
+        'blocks': blocks.map((rawBlock) {
+          final block = Map<String, Object?>.from(rawBlock);
+          block.remove('id');
+          block.remove('program_day_exercise_id');
+          return block;
+        }).toList(),
+      });
+    }
+    return {
+      'day_name': dayRows.first['day_name'],
+      'exercises': snapshotExercises,
+    };
+  }
+
+  Future<void> restoreProgramDaySnapshot(
+      int programDayId, Map<String, Object?> snapshot) async {
+    if (snapshot.isEmpty) return;
+    final db = await _db.database;
+    final rawExercises = snapshot['exercises'] as List<Object?>? ?? const [];
+    await db.transaction((txn) async {
+      await txn.update(
+        'program_day',
+        {'day_name': snapshot['day_name']},
+        where: 'id = ?',
+        whereArgs: [programDayId],
+      );
+      final existingExercises = await txn.query(
+        'program_day_exercise',
+        columns: ['id'],
+        where: 'program_day_id = ?',
+        whereArgs: [programDayId],
+      );
+      for (final rawExercise in existingExercises) {
+        final existingId = rawExercise['id'] as int;
+        await txn.delete(
+          'set_plan_block',
+          where: 'program_day_exercise_id = ?',
+          whereArgs: [existingId],
+        );
+      }
+      await txn.delete(
+        'program_day_exercise',
+        where: 'program_day_id = ?',
+        whereArgs: [programDayId],
+      );
+      for (final rawExercise in rawExercises) {
+        final exercise = Map<String, Object?>.from(rawExercise as Map);
+        final rawBlocks =
+            exercise.remove('blocks') as List<Object?>? ?? const [];
+        final newProgramDayExerciseId =
+            await txn.insert('program_day_exercise', {
+          'program_day_id': programDayId,
+          'exercise_id': exercise['exercise_id'],
+          'order_index': exercise['order_index'],
+          'notes': exercise['notes'],
+        });
+        for (final rawBlock in rawBlocks) {
+          final block = Map<String, Object?>.from(rawBlock as Map);
+          await txn.insert('set_plan_block', {
+            'program_day_exercise_id': newProgramDayExerciseId,
+            'order_index': block['order_index'],
+            'role': block['role'],
+            'set_count': block['set_count'],
+            'reps_min': block['reps_min'],
+            'reps_max': block['reps_max'],
+            'rest_sec_min': block['rest_sec_min'],
+            'rest_sec_max': block['rest_sec_max'],
+            'target_rpe_min': block['target_rpe_min'],
+            'target_rpe_max': block['target_rpe_max'],
+            'target_rir_min': block['target_rir_min'],
+            'target_rir_max': block['target_rir_max'],
+            'load_rule_type': block['load_rule_type'],
+            'load_rule_min': block['load_rule_min'],
+            'load_rule_max': block['load_rule_max'],
+            'amrap_last_set': block['amrap_last_set'],
+            'partials_target_min': block['partials_target_min'],
+            'partials_target_max': block['partials_target_max'],
+            'notes': block['notes'],
+          });
+        }
+      }
+    });
+  }
+
+  Future<List<Map<String, Object?>>> getProgramDayExercises(
+      int programDayId) async {
     final db = await _db.database;
     return db.query(
       'program_day_exercise',
@@ -241,7 +440,8 @@ class ProgramRepo {
     return rows.first['id'] as int?;
   }
 
-  Future<Map<int, List<String>>> getExerciseNamesByDayForProgram(int programId) async {
+  Future<Map<int, List<String>>> getExerciseNamesByDayForProgram(
+      int programId) async {
     final db = await _db.database;
     final rows = await db.rawQuery('''
 SELECT pd.id as day_id,

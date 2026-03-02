@@ -34,7 +34,8 @@ class _DayPreviewSet {
 }
 
 class DayPickerScreen extends StatefulWidget {
-  const DayPickerScreen({super.key, required this.programId, this.initialVoiceInput});
+  const DayPickerScreen(
+      {super.key, required this.programId, this.initialVoiceInput});
 
   final int programId;
   final String? initialVoiceInput;
@@ -56,7 +57,8 @@ class _DayPickerScreenState extends State<DayPickerScreen> {
     _programRepo = ProgramRepo(db);
     _workoutRepo = WorkoutRepo(db);
     _sessionService = SessionService(db);
-    _exerciseNamesByDayFuture = _programRepo.getExerciseNamesByDayForProgram(widget.programId);
+    _exerciseNamesByDayFuture =
+        _programRepo.getExerciseNamesByDayForProgram(widget.programId);
   }
 
   Future<void> _startSession(int programDayId) async {
@@ -70,16 +72,18 @@ class _DayPickerScreenState extends State<DayPickerScreen> {
       AppShellController.instance.setPendingSessionVoice(voiceInput.trim());
     }
     await Navigator.of(context).push(
-      MaterialPageRoute(builder: (_) => SessionScreen(contextData: contextData)),
+      SessionScreen.route(contextData: contextData),
     );
     await _syncActiveSessionBanner();
   }
 
   Future<void> _startSmartDay(List<Map<String, Object?>> days) async {
     if (days.isEmpty) return;
-    final lastIndex = await _workoutRepo.getLastCompletedDayIndex(widget.programId);
+    final lastIndex =
+        await _workoutRepo.getLastCompletedDayIndex(widget.programId);
     final nextIndex = lastIndex == null ? 0 : (lastIndex + 1) % days.length;
-    final day = days.firstWhere((d) => d['day_index'] == nextIndex, orElse: () => days.first);
+    final day = days.firstWhere((d) => d['day_index'] == nextIndex,
+        orElse: () => days.first);
     await _startSession(day['id'] as int);
   }
 
@@ -94,16 +98,19 @@ class _DayPickerScreenState extends State<DayPickerScreen> {
   Future<void> _openDayEditor(int programDayId) async {
     await Navigator.of(context).push(
       MaterialPageRoute(
-        builder: (_) => DayEditorScreen(programDayId: programDayId, programId: widget.programId),
+        builder: (_) => DayEditorScreen(
+            programDayId: programDayId, programId: widget.programId),
       ),
     );
     if (!mounted) return;
     setState(() {
-      _exerciseNamesByDayFuture = _programRepo.getExerciseNamesByDayForProgram(widget.programId);
+      _exerciseNamesByDayFuture =
+          _programRepo.getExerciseNamesByDayForProgram(widget.programId);
     });
   }
 
-  Future<List<_DayPreviewExercise>> _loadDayPreviewExercises(int programDayId) async {
+  Future<List<_DayPreviewExercise>> _loadDayPreviewExercises(
+      int programDayId) async {
     final rows = await _programRepo.getProgramDayExerciseDetails(programDayId);
     final previewRows = <_DayPreviewExercise>[];
     for (final row in rows) {
@@ -123,11 +130,17 @@ class _DayPickerScreenState extends State<DayPickerScreen> {
   List<_DayPreviewSet> _expandPreviewSets(List<Map<String, Object?>> blocks) {
     if (blocks.isEmpty) {
       return const [
-        _DayPreviewSet(setIndex: 1, repsMin: null, repsMax: null, rpeMin: null, rpeMax: null),
+        _DayPreviewSet(
+            setIndex: 1,
+            repsMin: null,
+            repsMax: null,
+            rpeMin: null,
+            rpeMax: null),
       ];
     }
     final ordered = List<Map<String, Object?>>.from(blocks)
-      ..sort((a, b) => ((a['order_index'] as int?) ?? 0).compareTo((b['order_index'] as int?) ?? 0));
+      ..sort((a, b) => ((a['order_index'] as int?) ?? 0)
+          .compareTo((b['order_index'] as int?) ?? 0));
     final previewSets = <_DayPreviewSet>[];
     var setIndex = 1;
     for (final block in ordered) {
@@ -179,7 +192,9 @@ class _DayPickerScreenState extends State<DayPickerScreen> {
 
   String _formatDecimal(double value) {
     final fixed = value.toStringAsFixed(2);
-    return fixed.replaceFirst(RegExp(r'0+$'), '').replaceFirst(RegExp(r'\.$'), '');
+    return fixed
+        .replaceFirst(RegExp(r'0+$'), '')
+        .replaceFirst(RegExp(r'\.$'), '');
   }
 
   Future<void> _showDayPreview(Map<String, Object?> day) async {
@@ -207,15 +222,23 @@ class _DayPickerScreenState extends State<DayPickerScreen> {
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
                             Text(
-                              dayName == null || dayName.isEmpty ? 'Day ${dayIndex + 1}' : dayName,
+                              dayName == null || dayName.isEmpty
+                                  ? 'Day ${dayIndex + 1}'
+                                  : dayName,
                               style: Theme.of(context).textTheme.titleLarge,
                             ),
                             const SizedBox(height: 4),
                             Text(
                               'Day ${dayIndex + 1} Preview',
-                              style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                                color: Theme.of(context).colorScheme.onSurface.withOpacity(0.65),
-                              ),
+                              style: Theme.of(context)
+                                  .textTheme
+                                  .bodySmall
+                                  ?.copyWith(
+                                    color: Theme.of(context)
+                                        .colorScheme
+                                        .onSurface
+                                        .withOpacity(0.65),
+                                  ),
                             ),
                           ],
                         ),
@@ -237,60 +260,85 @@ class _DayPickerScreenState extends State<DayPickerScreen> {
                       future: _loadDayPreviewExercises(dayId),
                       builder: (context, snapshot) {
                         if (snapshot.connectionState != ConnectionState.done) {
-                          return const Center(child: CircularProgressIndicator());
+                          return const Center(
+                              child: CircularProgressIndicator());
                         }
-                        final rows = snapshot.data ?? const <_DayPreviewExercise>[];
+                        final rows =
+                            snapshot.data ?? const <_DayPreviewExercise>[];
                         if (rows.isEmpty) {
-                          return const Center(child: Text('No exercises in this day yet.'));
+                          return const Center(
+                              child: Text('No exercises in this day yet.'));
                         }
                         return ListView.separated(
                           itemCount: rows.length,
-                          separatorBuilder: (_, __) => const SizedBox(height: 10),
+                          separatorBuilder: (_, __) =>
+                              const SizedBox(height: 10),
                           itemBuilder: (context, index) {
                             final row = rows[index];
-                            final headerStyle = Theme.of(context).textTheme.labelSmall?.copyWith(
+                            final headerStyle = Theme.of(context)
+                                .textTheme
+                                .labelSmall
+                                ?.copyWith(
                                   fontWeight: FontWeight.w700,
                                 );
                             return GlassCard(
-                              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 12, vertical: 10),
                               child: Column(
                                 crossAxisAlignment: CrossAxisAlignment.start,
                                 children: [
                                   Row(
                                     children: [
                                       Expanded(
-                                        child: Text(row.name, style: Theme.of(context).textTheme.titleMedium),
+                                        child: Text(row.name,
+                                            style: Theme.of(context)
+                                                .textTheme
+                                                .titleMedium),
                                       ),
                                       Text(
                                         '${row.sets.length} sets',
-                                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                                          color: Theme.of(context).colorScheme.onSurface.withOpacity(0.65),
-                                        ),
+                                        style: Theme.of(context)
+                                            .textTheme
+                                            .bodySmall
+                                            ?.copyWith(
+                                              color: Theme.of(context)
+                                                  .colorScheme
+                                                  .onSurface
+                                                  .withOpacity(0.65),
+                                            ),
                                       ),
                                     ],
                                   ),
                                   const SizedBox(height: 4),
                                   Container(
-                                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+                                    padding: const EdgeInsets.symmetric(
+                                        horizontal: 8, vertical: 6),
                                     decoration: BoxDecoration(
-                                      color: Theme.of(context).colorScheme.surface.withOpacity(0.2),
+                                      color: Theme.of(context)
+                                          .colorScheme
+                                          .surface
+                                          .withOpacity(0.2),
                                       borderRadius: BorderRadius.circular(8),
                                     ),
                                     child: Row(
                                       children: [
                                         SizedBox(
                                           width: 34,
-                                          child: Center(child: Text('Set', style: headerStyle)),
+                                          child: Center(
+                                              child: Text('Set',
+                                                  style: headerStyle)),
                                         ),
                                         const SizedBox(width: 8),
                                         Expanded(
-                                          child: Text('Reps', style: headerStyle),
+                                          child:
+                                              Text('Reps', style: headerStyle),
                                         ),
                                         SizedBox(
                                           width: 64,
                                           child: Align(
                                             alignment: Alignment.centerRight,
-                                            child: Text('RPE', style: headerStyle),
+                                            child:
+                                                Text('RPE', style: headerStyle),
                                           ),
                                         ),
                                       ],
@@ -301,26 +349,37 @@ class _DayPickerScreenState extends State<DayPickerScreen> {
                                     return Padding(
                                       padding: const EdgeInsets.only(bottom: 6),
                                       child: Container(
-                                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 7),
+                                        padding: const EdgeInsets.symmetric(
+                                            horizontal: 8, vertical: 7),
                                         decoration: BoxDecoration(
-                                          color: Theme.of(context).colorScheme.surface.withOpacity(0.12),
-                                          borderRadius: BorderRadius.circular(8),
+                                          color: Theme.of(context)
+                                              .colorScheme
+                                              .surface
+                                              .withOpacity(0.12),
+                                          borderRadius:
+                                              BorderRadius.circular(8),
                                         ),
                                         child: Row(
                                           children: [
                                             SizedBox(
                                               width: 34,
-                                              child: Center(child: Text('${setRow.setIndex}')),
+                                              child: Center(
+                                                  child: Text(
+                                                      '${setRow.setIndex}')),
                                             ),
                                             const SizedBox(width: 8),
                                             Expanded(
-                                              child: Text('${_repsLabel(setRow.repsMin, setRow.repsMax)} reps'),
+                                              child: Text(
+                                                  '${_repsLabel(setRow.repsMin, setRow.repsMax)} reps'),
                                             ),
                                             SizedBox(
                                               width: 64,
                                               child: Align(
-                                                alignment: Alignment.centerRight,
-                                                child: Text(_rpeLabel(setRow.rpeMin, setRow.rpeMax)),
+                                                alignment:
+                                                    Alignment.centerRight,
+                                                child: Text(_rpeLabel(
+                                                    setRow.rpeMin,
+                                                    setRow.rpeMax)),
                                               ),
                                             ),
                                           ],
@@ -352,7 +411,10 @@ class _DayPickerScreenState extends State<DayPickerScreen> {
                         shape: RoundedRectangleBorder(
                           borderRadius: BorderRadius.circular(10),
                         ),
-                        textStyle: Theme.of(context).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w700),
+                        textStyle: Theme.of(context)
+                            .textTheme
+                            .titleMedium
+                            ?.copyWith(fontWeight: FontWeight.w700),
                       ),
                     ),
                   ),
@@ -383,14 +445,16 @@ class _DayPickerScreenState extends State<DayPickerScreen> {
               }
               final days = snapshot.data ?? [];
               if (days.isEmpty) {
-                return const Center(child: Text('No days yet. Add one in the program editor.'));
+                return const Center(
+                    child: Text('No days yet. Add one in the program editor.'));
               }
               return Column(
                 children: [
                   Padding(
                     padding: const EdgeInsets.all(16),
                     child: GlassCard(
-                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 16, vertical: 12),
                       child: Row(
                         children: [
                           const Icon(Icons.auto_awesome),
@@ -406,19 +470,24 @@ class _DayPickerScreenState extends State<DayPickerScreen> {
                   ),
                   Expanded(
                     child: FutureBuilder<Map<int, List<String>>>(
-                      future: _exerciseNamesByDayFuture ??=
-                          _programRepo.getExerciseNamesByDayForProgram(widget.programId),
+                      future: _exerciseNamesByDayFuture ??= _programRepo
+                          .getExerciseNamesByDayForProgram(widget.programId),
                       builder: (context, namesSnapshot) {
-                        final namesByDay = namesSnapshot.data ?? const <int, List<String>>{};
+                        final namesByDay =
+                            namesSnapshot.data ?? const <int, List<String>>{};
                         return ListView.separated(
-                          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 16, vertical: 8),
                           itemCount: days.length,
-                          separatorBuilder: (_, __) => const SizedBox(height: 12),
+                          separatorBuilder: (_, __) =>
+                              const SizedBox(height: 12),
                           itemBuilder: (context, index) {
                             final day = days[index];
                             final dayId = day['id'] as int;
                             final names = namesByDay[dayId] ?? const <String>[];
-                            final description = names.isEmpty ? 'No exercises added yet' : names.join(', ');
+                            final description = names.isEmpty
+                                ? 'No exercises added yet'
+                                : names.join(', ');
                             return GlassCard(
                               padding: EdgeInsets.zero,
                               child: ListTile(
@@ -427,10 +496,16 @@ class _DayPickerScreenState extends State<DayPickerScreen> {
                                   description,
                                   maxLines: 2,
                                   overflow: TextOverflow.ellipsis,
-                                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                                    color: Theme.of(context).colorScheme.onSurface.withOpacity(0.62),
-                                    fontSize: 12,
-                                  ),
+                                  style: Theme.of(context)
+                                      .textTheme
+                                      .bodySmall
+                                      ?.copyWith(
+                                        color: Theme.of(context)
+                                            .colorScheme
+                                            .onSurface
+                                            .withOpacity(0.62),
+                                        fontSize: 12,
+                                      ),
                                 ),
                                 trailing: const Icon(Icons.chevron_right),
                                 onTap: () => _showDayPreview(day),
