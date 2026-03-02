@@ -11,6 +11,7 @@ class DietRepo {
   Future<int> addEntry({
     required String mealName,
     required DateTime loggedAt,
+    required DietMealType mealType,
     double? calories,
     double? proteinG,
     double? carbsG,
@@ -32,6 +33,7 @@ class DietRepo {
     return db.insert('diet_entry', {
       'meal_name': mealName,
       'logged_at': loggedAt.toIso8601String(),
+      'meal_type': mealType.storageValue,
       'calories': calories,
       'protein_g': proteinG,
       'carbs_g': carbsG,
@@ -59,7 +61,19 @@ class DietRepo {
       'diet_entry',
       where: 'logged_at >= ? AND logged_at < ?',
       whereArgs: [start.toIso8601String(), end.toIso8601String()],
-      orderBy: 'logged_at DESC',
+      orderBy: 'logged_at ASC',
+    );
+    return rows.map(_fromRow).toList();
+  }
+
+  Future<List<DietEntry>> getEntriesForRange(
+      DateTime start, DateTime end) async {
+    final db = await _db.database;
+    final rows = await db.query(
+      'diet_entry',
+      where: 'logged_at >= ? AND logged_at < ?',
+      whereArgs: [start.toIso8601String(), end.toIso8601String()],
+      orderBy: 'logged_at ASC',
     );
     return rows.map(_fromRow).toList();
   }
@@ -197,6 +211,8 @@ ORDER BY day DESC
   Future<void> updateEntry({
     required int id,
     String? mealName,
+    DateTime? loggedAt,
+    DietMealType? mealType,
     double? calories,
     double? proteinG,
     double? carbsG,
@@ -219,6 +235,8 @@ ORDER BY day DESC
       'diet_entry',
       {
         if (mealName != null) 'meal_name': mealName,
+        if (loggedAt != null) 'logged_at': loggedAt.toIso8601String(),
+        if (mealType != null) 'meal_type': mealType.storageValue,
         if (calories != null) 'calories': calories,
         if (proteinG != null) 'protein_g': proteinG,
         if (carbsG != null) 'carbs_g': carbsG,
@@ -251,6 +269,11 @@ ORDER BY day DESC
       id: row['id'] as int,
       mealName: row['meal_name'] as String,
       loggedAt: DateTime.parse(row['logged_at'] as String),
+      mealType: row['meal_type'] == null
+          ? DietMealTypeX.inferFromLoggedAt(
+              DateTime.parse(row['logged_at'] as String),
+            )
+          : DietMealTypeX.fromStorage(row['meal_type'] as String?),
       calories: _asDouble(row['calories']),
       proteinG: _asDouble(row['protein_g']),
       carbsG: _asDouble(row['carbs_g']),

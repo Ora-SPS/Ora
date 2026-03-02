@@ -16,6 +16,7 @@ class FoodDatabaseService {
 
   static const Duration _searchTtl = Duration(days: 7);
   static const Duration _barcodeTtl = Duration(days: 30);
+  static const String _searchCacheVersion = 'v2';
   static const String _usdaApiKey = String.fromEnvironment(
     'USDA_API_KEY',
     defaultValue: 'DEMO_KEY',
@@ -33,7 +34,7 @@ class FoodDatabaseService {
     }
     unawaited(_cacheRepo.purgeExpired());
     final overrides = await _overrideRepo.search(query);
-    final cacheKey = 'search:$normalized';
+    final cacheKey = 'search:$_searchCacheVersion:$normalized';
     final cached = await _cacheRepo.getFresh(cacheKey);
     if (cached != null) {
       final cachedResponse = _responseFromMap(cached);
@@ -44,23 +45,36 @@ class FoodDatabaseService {
       _searchOpenFoodFacts(query),
       _searchUsda(query),
     ]);
-    final items = _mergeCandidates([
+    final mergedItems = _mergeCandidates([
       ...fetches[0].items,
       ...fetches[1].items,
     ], query: normalized);
-    final infoMessage = _mergeInfoMessage(fetches);
+    final items = _filterSearchResults(
+      mergedItems,
+      query: normalized,
+      openFoodFacts: fetches[0],
+      usda: fetches[1],
+    );
+    final infoMessage = _searchInfoMessage(
+      fetches,
+      query: normalized,
+      items: items,
+    );
+    final degraded = fetches.any((fetch) => fetch.rateLimited || fetch.failed);
     if (items.isNotEmpty) {
       final response = FoodLookupResponse(
         items: items,
         infoMessage: infoMessage,
       );
-      await _cacheRepo.put(
-        cacheKey: cacheKey,
-        cacheType: 'search',
-        queryText: normalized,
-        payload: _responseToMap(response),
-        ttl: _searchTtl,
-      );
+      if (!degraded) {
+        await _cacheRepo.put(
+          cacheKey: cacheKey,
+          cacheType: 'search',
+          queryText: normalized,
+          payload: _responseToMap(response),
+          ttl: _searchTtl,
+        );
+      }
       return _withOverrides(response, overrides);
     }
 
@@ -208,14 +222,15 @@ class FoodDatabaseService {
     String query, {
     int limit = 10,
   }) async {
+    final rawLimit = limit < 50 ? 50 : limit;
     final uri = Uri.https(_openFoodFactsHost, '/cgi/search.pl', {
       'search_terms': query,
       'search_simple': '1',
       'action': 'process',
       'json': '1',
-      'page_size': '$limit',
+      'page_size': '$rawLimit',
       'fields':
-          'code,product_name,brands,serving_size,quantity,product_quantity,product_quantity_unit,nutriments,image_url,image_front_url',
+          'code,product_name,product_name_en,lang,brands,serving_size,quantity,product_quantity,product_quantity_unit,nutriments,image_url,image_front_url',
     });
     return _runFetch(() async {
       final response = await _client.get(uri, headers: const {
@@ -229,17 +244,17 @@ class FoodDatabaseService {
       }
       final body = jsonDecode(response.body) as Map<String, dynamic>;
       final products = body['products'] as List<dynamic>? ?? const [];
-      final items = products
-          .whereType<Map>()
-          .map(
-            (item) => _normalizeOpenFoodFactsProduct(
-              item.cast<String, dynamic>(),
-              query: query,
-              matchType: FoodMatchType.brandedName,
-            ),
-          )
-          .whereType<FoodSearchItem>()
-          .toList();
+      final items = <FoodSearchItem>[];
+      for (final rawItem in products.whereType<Map>()) {
+        final normalized = _tryNormalizeOpenFoodFactsProduct(
+          rawItem.cast<String, dynamic>(),
+          query: query,
+          matchType: FoodMatchType.brandedName,
+        );
+        if (normalized != null) {
+          items.add(normalized);
+        }
+      }
       return _FetchOutcome(items: items);
     });
   }
@@ -247,7 +262,7 @@ class FoodDatabaseService {
   Future<_FetchOutcome> _lookupOpenFoodFactsBarcode(String barcode) async {
     final uri = Uri.https(_openFoodFactsHost, '/api/v2/product/$barcode', {
       'fields':
-          'code,product_name,brands,serving_size,quantity,product_quantity,product_quantity_unit,nutriments,image_url,image_front_url',
+          'code,product_name,product_name_en,lang,brands,serving_size,quantity,product_quantity,product_quantity_unit,nutriments,image_url,image_front_url',
     });
     return _runFetch(() async {
       final response = await _client.get(uri, headers: const {
@@ -310,21 +325,21 @@ class FoodDatabaseService {
       }
       final body = jsonDecode(response.body) as Map<String, dynamic>;
       final foods = body['foods'] as List<dynamic>? ?? const [];
-      final items = foods
-          .whereType<Map>()
-          .map(
-            (item) => _normalizeUsdaFood(
-              item.cast<String, dynamic>(),
-              query: query,
-              matchType: brandedOnly || genericOnly
-                  ? (genericOnly
-                      ? FoodMatchType.genericName
-                      : FoodMatchType.brandedName)
-                  : null,
-            ),
-          )
-          .whereType<FoodSearchItem>()
-          .toList();
+      final items = <FoodSearchItem>[];
+      for (final rawItem in foods.whereType<Map>()) {
+        final normalized = _tryNormalizeUsdaFood(
+          rawItem.cast<String, dynamic>(),
+          query: query,
+          matchType: brandedOnly || genericOnly
+              ? (genericOnly
+                  ? FoodMatchType.genericName
+                  : FoodMatchType.brandedName)
+              : null,
+        );
+        if (normalized != null) {
+          items.add(normalized);
+        }
+      }
       if (!forceNetwork && items.isEmpty) {
         return const _FetchOutcome(items: []);
       }
@@ -361,13 +376,11 @@ class FoodDatabaseService {
           .whereType<Map>()
           .map((item) => item.cast<String, dynamic>())
           .where((item) => item['gtinUpc']?.toString().trim() == barcode)
-          .map(
-            (item) => _normalizeUsdaFood(
-              item,
-              query: barcode,
-              matchType: FoodMatchType.exactBarcode,
-            ),
-          )
+          .map((item) => _tryNormalizeUsdaFood(
+                item,
+                query: barcode,
+                matchType: FoodMatchType.exactBarcode,
+              ))
           .whereType<FoodSearchItem>()
           .toList();
       return _FetchOutcome(items: items);
@@ -391,8 +404,17 @@ class FoodDatabaseService {
     required String query,
     required FoodMatchType matchType,
   }) {
-    final name = product['product_name']?.toString().trim();
+    final rawName = product['product_name']?.toString().trim();
+    final englishName = product['product_name_en']?.toString().trim();
+    final sourceLang = product['lang']?.toString().trim().toLowerCase();
+    final name =
+        englishName != null && englishName.isNotEmpty ? englishName : rawName;
     final barcode = product['code']?.toString().trim();
+    if (matchType != FoodMatchType.exactBarcode &&
+        (name == null || name.isEmpty) &&
+        sourceLang != 'en') {
+      return null;
+    }
     if ((name == null || name.isEmpty) &&
         (barcode == null || barcode.isEmpty)) {
       return null;
@@ -460,6 +482,22 @@ class FoodDatabaseService {
     );
   }
 
+  FoodSearchItem? _tryNormalizeOpenFoodFactsProduct(
+    Map<String, dynamic> product, {
+    required String query,
+    required FoodMatchType matchType,
+  }) {
+    try {
+      return _normalizeOpenFoodFactsProduct(
+        product,
+        query: query,
+        matchType: matchType,
+      );
+    } catch (_) {
+      return null;
+    }
+  }
+
   FoodSearchItem? _normalizeUsdaFood(
     Map<String, dynamic> food, {
     required String query,
@@ -520,6 +558,18 @@ class FoodDatabaseService {
       qualityScore: qualityScore,
       notes: 'USDA FoodData Central',
     );
+  }
+
+  FoodSearchItem? _tryNormalizeUsdaFood(
+    Map<String, dynamic> food, {
+    required String query,
+    FoodMatchType? matchType,
+  }) {
+    try {
+      return _normalizeUsdaFood(food, query: query, matchType: matchType);
+    } catch (_) {
+      return null;
+    }
   }
 
   FoodNutrients _readOpenFoodFactsPer100g(
@@ -824,6 +874,7 @@ class FoodDatabaseService {
 
   int _rankItem(FoodSearchItem item, {String? query}) {
     final queryScore = _queryRelevanceScore(item, query);
+    final breadthPenalty = _breadthPenalty(item, query);
     final matchScore = switch (item.matchType) {
       FoodMatchType.custom => 500,
       FoodMatchType.exactBarcode => 400,
@@ -844,7 +895,8 @@ class FoodDatabaseService {
         sourceScore +
         item.qualityScore +
         portionScore +
-        packageScore;
+        packageScore -
+        breadthPenalty;
   }
 
   int _queryRelevanceScore(FoodSearchItem item, String? query) {
@@ -1004,6 +1056,112 @@ class FoodDatabaseService {
       penalty += 80;
     }
     return penalty;
+  }
+
+  int _breadthPenalty(FoodSearchItem item, String? query) {
+    final normalizedQuery = _normalize(query ?? '');
+    if (normalizedQuery.isEmpty) {
+      return 0;
+    }
+
+    final normalizedName = _normalize(item.name);
+    final normalizedDisplay = _normalize(item.displayName);
+    final singularQuery = _singularizePhrase(normalizedQuery);
+    final hasDirectNameMatch = normalizedName.contains(normalizedQuery) ||
+        normalizedDisplay.contains(normalizedQuery) ||
+        _singularizePhrase(normalizedName).contains(singularQuery) ||
+        _singularizePhrase(normalizedDisplay).contains(singularQuery);
+    if (hasDirectNameMatch) {
+      return 0;
+    }
+
+    var penalty = 160;
+    if (item.source == FoodSourceType.openFoodFacts &&
+        item.kind == FoodKind.branded) {
+      penalty += 180;
+    }
+
+    final words = normalizedDisplay
+        .split(' ')
+        .where((part) => part.isNotEmpty)
+        .map(_singularizeWord)
+        .toList();
+    if (words.any(_broadPackagedWords.contains)) {
+      penalty += 220;
+    }
+    return penalty;
+  }
+
+  List<FoodSearchItem> _filterSearchResults(
+    List<FoodSearchItem> items, {
+    required String query,
+    required _FetchOutcome openFoodFacts,
+    required _FetchOutcome usda,
+  }) {
+    if (!_isLikelyGenericQuery(query)) {
+      return items;
+    }
+
+    final usdaAvailable =
+        usda.items.isNotEmpty && !usda.rateLimited && !usda.failed;
+    final filtered = items.where((item) {
+      if (item.source == FoodSourceType.custom ||
+          item.source == FoodSourceType.usda) {
+        return true;
+      }
+      if (item.kind == FoodKind.generic ||
+          item.matchType == FoodMatchType.exactName) {
+        return true;
+      }
+      if (!_hasDirectFoodNameMatch(item, query)) {
+        return false;
+      }
+      if (_isBroadPackagedItem(item)) {
+        return false;
+      }
+      if (!usdaAvailable && item.kind == FoodKind.branded) {
+        return false;
+      }
+      return true;
+    }).toList();
+
+    if (filtered.isNotEmpty) {
+      return filtered;
+    }
+    return items;
+  }
+
+  bool _isLikelyGenericQuery(String query) {
+    final words = query.split(' ').where((part) => part.isNotEmpty).toList();
+    if (words.isEmpty || words.length > 2) {
+      return false;
+    }
+    if (RegExp(r'\d').hasMatch(query)) {
+      return false;
+    }
+    return !words.any((word) =>
+        _dishWords.contains(word) ||
+        _compoundFoodWords.contains(word) ||
+        _broadPackagedWords.contains(word));
+  }
+
+  bool _hasDirectFoodNameMatch(FoodSearchItem item, String query) {
+    final normalizedName = _normalize(item.name);
+    final normalizedDisplay = _normalize(item.displayName);
+    final singularQuery = _singularizePhrase(query);
+    return normalizedName.contains(query) ||
+        normalizedDisplay.contains(query) ||
+        _singularizePhrase(normalizedName).contains(singularQuery) ||
+        _singularizePhrase(normalizedDisplay).contains(singularQuery);
+  }
+
+  bool _isBroadPackagedItem(FoodSearchItem item) {
+    final words = _normalize(item.displayName)
+        .split(' ')
+        .where((part) => part.isNotEmpty)
+        .map(_singularizeWord)
+        .toList();
+    return words.any(_broadPackagedWords.contains);
   }
 
   bool _hasConflict(FoodNutrients a, FoodNutrients b) {
@@ -1225,6 +1383,20 @@ class FoodDatabaseService {
     return null;
   }
 
+  String? _searchInfoMessage(
+    List<_FetchOutcome> fetches, {
+    required String query,
+    required List<FoodSearchItem> items,
+  }) {
+    final genericQuery = _isLikelyGenericQuery(query);
+    final usda =
+        fetches.length > 1 ? fetches[1] : const _FetchOutcome(items: []);
+    if (genericQuery && items.isEmpty && (usda.rateLimited || usda.failed)) {
+      return 'Generic food results are temporarily limited. Try again later or search for a packaged food.';
+    }
+    return _mergeInfoMessage(fetches);
+  }
+
   Map<String, dynamic> _responseToMap(FoodLookupResponse response) {
     return {
       'items': response.items.map((item) => item.toMap()).toList(),
@@ -1378,4 +1550,25 @@ const Set<String> _descriptorWords = {
   'drained',
   'heated',
   'microwaved',
+};
+
+const Set<String> _broadPackagedWords = {
+  'chip',
+  'crisp',
+  'snack',
+  'pringle',
+  'wafer',
+  'barbecue',
+  'bbq',
+  'cream',
+  'onion',
+  'salted',
+  'salt',
+  'sour',
+  'vinegar',
+  'cheese',
+  'pesto',
+  'mozzarella',
+  'flavour',
+  'flavor',
 };

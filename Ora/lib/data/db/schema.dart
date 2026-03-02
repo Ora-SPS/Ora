@@ -1,5 +1,5 @@
 const dbName = 'ora.db';
-const dbVersion = 9;
+const dbVersion = 10;
 
 const createTableExercise = '''
 CREATE TABLE exercise(
@@ -154,6 +154,7 @@ CREATE TABLE diet_entry(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   meal_name TEXT NOT NULL,
   logged_at TEXT NOT NULL,
+  meal_type TEXT NOT NULL DEFAULT 'snack',
   calories REAL,
   protein_g REAL,
   carbs_g REAL,

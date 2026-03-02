@@ -12,18 +12,21 @@ class FoodPickerScreen extends StatefulWidget {
   const FoodPickerScreen({
     super.key,
     required this.dietRepo,
+    required this.targetDay,
     this.startWithScanner = false,
   });
 
   static Future<FoodLogDraft?> show(
     BuildContext context, {
     required DietRepo dietRepo,
+    required DateTime targetDay,
     bool startWithScanner = false,
   }) {
     return Navigator.of(context).push<FoodLogDraft>(
       MaterialPageRoute(
         builder: (_) => FoodPickerScreen(
           dietRepo: dietRepo,
+          targetDay: targetDay,
           startWithScanner: startWithScanner,
         ),
       ),
@@ -31,6 +34,7 @@ class FoodPickerScreen extends StatefulWidget {
   }
 
   final DietRepo dietRepo;
+  final DateTime targetDay;
   final bool startWithScanner;
 
   @override
@@ -110,7 +114,7 @@ class _FoodPickerScreenState extends State<FoodPickerScreen> {
         ? const <dynamic>[]
         : await widget.dietRepo.getEntriesForBarcodeOnDay(
             barcode: item.barcode!,
-            day: DateTime.now(),
+            day: widget.targetDay,
           );
     if (!mounted) return;
     final draft = await showModalBottomSheet<FoodLogDraft>(
@@ -202,19 +206,19 @@ class _FoodPickerScreenState extends State<FoodPickerScreen> {
               child: _loading
                   ? const Center(child: CircularProgressIndicator())
                   : _items.isEmpty
-                  ? _EmptyState(searched: _searched)
-                  : ListView.separated(
-                      itemCount: _items.length,
-                      separatorBuilder: (context, index) =>
-                          const SizedBox(height: 10),
-                      itemBuilder: (context, index) {
-                        final item = _items[index];
-                        return _FoodResultCard(
-                          item: item,
-                          onTap: () => _openEditor(item),
-                        );
-                      },
-                    ),
+                      ? _EmptyState(searched: _searched)
+                      : ListView.separated(
+                          itemCount: _items.length,
+                          separatorBuilder: (context, index) =>
+                              const SizedBox(height: 10),
+                          itemBuilder: (context, index) {
+                            final item = _items[index];
+                            return _FoodResultCard(
+                              item: item,
+                              onTap: () => _openEditor(item),
+                            );
+                          },
+                        ),
             ),
           ],
         ),
@@ -271,8 +275,8 @@ class _FoodResultCard extends StatelessWidget {
                   item.source == FoodSourceType.usda
                       ? 'USDA'
                       : item.source == FoodSourceType.custom
-                      ? 'Custom'
-                      : 'Open Food Facts',
+                          ? 'Custom'
+                          : 'Open Food Facts',
                 ),
                 if (item.hasConflict) const _ChipLabel('Conflict'),
                 if (item.isUserOverride) const _ChipLabel('Override'),
@@ -589,7 +593,7 @@ class _FoodEditorSheetState extends State<_FoodEditorSheet> {
               Padding(
                 padding: const EdgeInsets.only(bottom: 8),
                 child: Text(
-                  'Already logged today: ${widget.duplicateCount}',
+                  'Already logged for this day: ${widget.duplicateCount}',
                   style: TextStyle(
                     color: Theme.of(context).colorScheme.secondary,
                   ),
@@ -732,8 +736,7 @@ String _prettyMicroLabel(String key) {
       .replaceAll('_', ' ')
       .split(' ')
       .map((segment) {
-        if (segment.isEmpty || segment.startsWith('(')) return segment;
-        return '${segment[0].toUpperCase()}${segment.substring(1)}';
-      })
-      .join(' ');
+    if (segment.isEmpty || segment.startsWith('(')) return segment;
+    return '${segment[0].toUpperCase()}${segment.substring(1)}';
+  }).join(' ');
 }

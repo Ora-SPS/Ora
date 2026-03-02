@@ -35,15 +35,18 @@ class _DietScreenState extends State<DietScreen> {
 
   DietTimeScale _timeScale = DietTimeScale.day;
   DietNutrientView _nutrientView = DietNutrientView.macros;
+  DateTime _anchorDay = _startOfDay(DateTime.now());
   bool _loading = true;
   List<DietEntry> _allMeals = const [];
   DietSummary _summary = const DietSummary();
   Map<String, double> _microsSummary = const {};
+  final Set<String> _collapsedSections = <String>{};
   final _imagePicker = ImagePicker();
   final _dietAnalysis = DietAnalysisService();
   final _foodDatabaseService = FoodDatabaseService();
   final _stt = SpeechToTextEngine.instance;
   bool _handlingInput = false;
+  final bool _showLegacyMealList = false;
 
   final _goalCalories = TextEditingController();
   final _goalProtein = TextEditingController();
@@ -88,7 +91,11 @@ class _DietScreenState extends State<DietScreen> {
         final optimized = await ImageDownscaler.downscaleImageIfNeeded(
           event.file!,
         );
-        await _analyzePhoto(optimized);
+        await _analyzePhoto(
+          optimized,
+          mealType: DietMealType.snack,
+          targetDay: _startOfDay(DateTime.now()),
+        );
       } else {
         UploadService.instance.enqueue(
           UploadItem(
@@ -105,7 +112,11 @@ class _DietScreenState extends State<DietScreen> {
         }
       }
     } else if ((dispatch.entity ?? event.text)?.trim().isNotEmpty == true) {
-      await _analyzeTextLog((dispatch.entity ?? event.text!).trim());
+      await _analyzeTextLog(
+        (dispatch.entity ?? event.text!).trim(),
+        mealType: DietMealType.snack,
+        targetDay: _startOfDay(DateTime.now()),
+      );
     }
     _handlingInput = false;
   }
@@ -118,10 +129,36 @@ class _DietScreenState extends State<DietScreen> {
         lower.endsWith('.heic');
   }
 
+  static DateTime _startOfDay(DateTime value) {
+    return DateTime(value.year, value.month, value.day);
+  }
+
+  _DietRange _rangeForScale() {
+    final endExclusive = _anchorDay.add(const Duration(days: 1));
+    switch (_timeScale) {
+      case DietTimeScale.day:
+        return _DietRange(start: _anchorDay, endExclusive: endExclusive);
+      case DietTimeScale.week:
+        return _DietRange(
+          start: _anchorDay.subtract(const Duration(days: 6)),
+          endExclusive: endExclusive,
+        );
+      case DietTimeScale.month:
+        return _DietRange(
+          start: _anchorDay.subtract(const Duration(days: 29)),
+          endExclusive: endExclusive,
+        );
+    }
+  }
+
   Future<void> _load() async {
+    final range = _rangeForScale();
     final summary = await _loadSummaryForScale();
     final micros = await _loadMicrosForScale();
-    final allMeals = await _dietRepo.getRecentEntries(limit: 200);
+    final allMeals = await _dietRepo.getEntriesForRange(
+      range.start,
+      range.endExclusive,
+    );
     await _loadGoals();
     setState(() {
       _summary = summary;
@@ -132,59 +169,13 @@ class _DietScreenState extends State<DietScreen> {
   }
 
   Future<DietSummary> _loadSummaryForScale() {
-    final now = DateTime.now();
-    final end = DateTime(
-      now.year,
-      now.month,
-      now.day,
-    ).add(const Duration(days: 1));
-    switch (_timeScale) {
-      case DietTimeScale.day:
-        final start = DateTime(now.year, now.month, now.day);
-        return _dietRepo.getSummaryForRange(start, end);
-      case DietTimeScale.week:
-        final start = DateTime(
-          now.year,
-          now.month,
-          now.day,
-        ).subtract(const Duration(days: 6));
-        return _dietRepo.getSummaryForRange(start, end);
-      case DietTimeScale.month:
-        final start = DateTime(
-          now.year,
-          now.month,
-          now.day,
-        ).subtract(const Duration(days: 29));
-        return _dietRepo.getSummaryForRange(start, end);
-    }
+    final range = _rangeForScale();
+    return _dietRepo.getSummaryForRange(range.start, range.endExclusive);
   }
 
   Future<Map<String, double>> _loadMicrosForScale() {
-    final now = DateTime.now();
-    final end = DateTime(
-      now.year,
-      now.month,
-      now.day,
-    ).add(const Duration(days: 1));
-    switch (_timeScale) {
-      case DietTimeScale.day:
-        final start = DateTime(now.year, now.month, now.day);
-        return _dietRepo.getMicrosForRange(start, end);
-      case DietTimeScale.week:
-        final start = DateTime(
-          now.year,
-          now.month,
-          now.day,
-        ).subtract(const Duration(days: 6));
-        return _dietRepo.getMicrosForRange(start, end);
-      case DietTimeScale.month:
-        final start = DateTime(
-          now.year,
-          now.month,
-          now.day,
-        ).subtract(const Duration(days: 29));
-        return _dietRepo.getMicrosForRange(start, end);
-    }
+    final range = _rangeForScale();
+    return _dietRepo.getMicrosForRange(range.start, range.endExclusive);
   }
 
   Future<void> _loadGoals() async {
@@ -212,7 +203,11 @@ class _DietScreenState extends State<DietScreen> {
     await _settingsRepo.setValue('diet_goal_sodium', _goalSodium.text.trim());
   }
 
-  Future<void> _addMeal({String? initialName}) async {
+  Future<void> _addMeal({
+    String? initialName,
+    required DietMealType mealType,
+    required DateTime targetDay,
+  }) async {
     final nameController = TextEditingController();
     final caloriesController = TextEditingController();
     final proteinController = TextEditingController();
@@ -221,6 +216,7 @@ class _DietScreenState extends State<DietScreen> {
     final fiberController = TextEditingController();
     final sodiumController = TextEditingController();
     final notesController = TextEditingController();
+    var selectedMealType = mealType;
 
     if (initialName != null && initialName.trim().isNotEmpty) {
       nameController.text = initialName.trim();
@@ -244,6 +240,23 @@ class _DietScreenState extends State<DietScreen> {
               children: [
                 const Text('Add meal'),
                 const SizedBox(height: 12),
+                DropdownButtonFormField<DietMealType>(
+                  initialValue: selectedMealType,
+                  decoration: const InputDecoration(labelText: 'Meal type'),
+                  items: DietMealType.values
+                      .map(
+                        (value) => DropdownMenuItem(
+                          value: value,
+                          child: Text(value.label),
+                        ),
+                      )
+                      .toList(),
+                  onChanged: (value) {
+                    if (value == null) return;
+                    selectedMealType = value;
+                  },
+                ),
+                const SizedBox(height: 8),
                 TextField(
                   controller: nameController,
                   decoration: const InputDecoration(labelText: 'Meal name'),
@@ -288,7 +301,8 @@ class _DietScreenState extends State<DietScreen> {
     if (name.isEmpty) return;
     await _dietRepo.addEntry(
       mealName: name,
-      loggedAt: DateTime.now(),
+      loggedAt: _loggedAtForDay(targetDay),
+      mealType: selectedMealType,
       calories: _parseAndClamp(caloriesController.text, max: 6000),
       proteinG: _parseAndClamp(proteinController.text, max: 500),
       carbsG: _parseAndClamp(carbsController.text, max: 800),
@@ -329,9 +343,7 @@ class _DietScreenState extends State<DietScreen> {
               children: [
                 const Text('Copy previous meal'),
                 const SizedBox(height: 12),
-                ..._allMeals
-                    .take(20)
-                    .map(
+                ..._allMeals.take(20).map(
                       (meal) => ListTile(
                         contentPadding: EdgeInsets.zero,
                         title: Text(meal.mealName),
@@ -349,6 +361,7 @@ class _DietScreenState extends State<DietScreen> {
     await _dietRepo.addEntry(
       mealName: selected.mealName,
       loggedAt: DateTime.now(),
+      mealType: selected.mealType,
       calories: selected.calories,
       proteinG: selected.proteinG,
       carbsG: selected.carbsG,
@@ -361,7 +374,10 @@ class _DietScreenState extends State<DietScreen> {
     await _load();
   }
 
-  Future<void> _pickMedia() async {
+  Future<void> _pickMedia({
+    required DietMealType mealType,
+    required DateTime targetDay,
+  }) async {
     final ok = await CloudConsent.ensureDietConsent(context, _settingsRepo);
     if (!ok || !mounted) return;
     final result = await FilePicker.platform.pickFiles(
@@ -374,10 +390,17 @@ class _DietScreenState extends State<DietScreen> {
     final optimized = await ImageDownscaler.downscaleImageIfNeeded(
       File(file.path!),
     );
-    await _analyzePhoto(optimized);
+    await _analyzePhoto(
+      optimized,
+      mealType: mealType,
+      targetDay: targetDay,
+    );
   }
 
-  Future<void> _useCamera() async {
+  Future<void> _useCamera({
+    required DietMealType mealType,
+    required DateTime targetDay,
+  }) async {
     if (!(Platform.isAndroid || Platform.isIOS)) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Camera is available on mobile devices.')),
@@ -392,7 +415,11 @@ class _DietScreenState extends State<DietScreen> {
       final optimized = await ImageDownscaler.downscaleImageIfNeeded(
         File(file.path),
       );
-      await _analyzePhoto(optimized);
+      await _analyzePhoto(
+        optimized,
+        mealType: mealType,
+        targetDay: targetDay,
+      );
     } on PlatformException catch (error) {
       if (!mounted) return;
       final message = error.code.contains('camera')
@@ -413,7 +440,10 @@ class _DietScreenState extends State<DietScreen> {
     }
   }
 
-  Future<void> _scanBarcode() async {
+  Future<void> _scanBarcode({
+    required DietMealType mealType,
+    required DateTime targetDay,
+  }) async {
     if (!(Platform.isAndroid || Platform.isIOS)) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
@@ -425,12 +455,14 @@ class _DietScreenState extends State<DietScreen> {
     final draft = await FoodPickerScreen.show(
       context,
       dietRepo: _dietRepo,
+      targetDay: targetDay,
       startWithScanner: true,
     );
     if (!mounted || draft == null) return;
     await _dietRepo.addEntry(
       mealName: draft.mealName,
-      loggedAt: DateTime.now(),
+      loggedAt: _loggedAtForDay(targetDay),
+      mealType: mealType,
       calories: draft.nutrients.calories,
       proteinG: draft.nutrients.proteinG,
       carbsG: draft.nutrients.carbsG,
@@ -453,12 +485,20 @@ class _DietScreenState extends State<DietScreen> {
     await _load();
   }
 
-  Future<void> _openFoodDatabase() async {
-    final draft = await FoodPickerScreen.show(context, dietRepo: _dietRepo);
+  Future<void> _openFoodDatabase({
+    required DietMealType mealType,
+    required DateTime targetDay,
+  }) async {
+    final draft = await FoodPickerScreen.show(
+      context,
+      dietRepo: _dietRepo,
+      targetDay: targetDay,
+    );
     if (!mounted || draft == null) return;
     await _dietRepo.addEntry(
       mealName: draft.mealName,
-      loggedAt: DateTime.now(),
+      loggedAt: _loggedAtForDay(targetDay),
+      mealType: mealType,
       calories: draft.nutrients.calories,
       proteinG: draft.nutrients.proteinG,
       carbsG: draft.nutrients.carbsG,
@@ -553,7 +593,11 @@ class _DietScreenState extends State<DietScreen> {
     await _dietRepo.deleteEntry(entry.id);
   }
 
-  Future<void> _analyzePhoto(File file) async {
+  Future<void> _analyzePhoto(
+    File file, {
+    required DietMealType mealType,
+    required DateTime targetDay,
+  }) async {
     final ok = await CloudConsent.ensureDietConsent(context, _settingsRepo);
     if (!ok || !context.mounted) return;
     final enabled = await _settingsRepo.getCloudEnabled();
@@ -583,10 +627,19 @@ class _DietScreenState extends State<DietScreen> {
       ).showSnackBar(const SnackBar(content: Text('Unable to analyze photo.')));
       return;
     }
-    await _reviewEstimate(estimate, imagePath: file.path);
+    await _reviewEstimate(
+      estimate,
+      imagePath: file.path,
+      mealType: mealType,
+      targetDay: targetDay,
+    );
   }
 
-  Future<void> _analyzeTextLog(String text) async {
+  Future<void> _analyzeTextLog(
+    String text, {
+    DietMealType mealType = DietMealType.snack,
+    DateTime? targetDay,
+  }) async {
     final ok = await CloudConsent.ensureDietConsent(context, _settingsRepo);
     if (!ok || !mounted) return;
     final enabled = await _settingsRepo.getCloudEnabled();
@@ -611,15 +664,25 @@ class _DietScreenState extends State<DietScreen> {
     );
     if (!mounted) return;
     if (estimate == null) {
-      await _addMeal(initialName: text);
+      await _addMeal(
+        initialName: text,
+        mealType: mealType,
+        targetDay: targetDay ?? _startOfDay(DateTime.now()),
+      );
       return;
     }
-    await _reviewEstimate(estimate);
+    await _reviewEstimate(
+      estimate,
+      mealType: mealType,
+      targetDay: targetDay ?? _startOfDay(DateTime.now()),
+    );
   }
 
   Future<void> _reviewEstimate(
     DietEstimate estimate, {
     String? imagePath,
+    required DietMealType mealType,
+    required DateTime targetDay,
   }) async {
     final refineController = TextEditingController();
     final servingsController = TextEditingController(text: '1');
@@ -649,6 +712,7 @@ class _DietScreenState extends State<DietScreen> {
     };
     DietEstimate baseEstimate = estimate;
     DietEstimate current = estimate;
+    var selectedMealType = mealType;
     await showModalBottomSheet<void>(
       context: context,
       isScrollControlled: true,
@@ -701,9 +765,8 @@ class _DietScreenState extends State<DietScreen> {
                   final multiplier = (totalGrams != null && servingSize > 0)
                       ? (totalGrams / servingSize)
                       : servings;
-                  final normalized = (multiplier <= 0
-                      ? 1.0
-                      : multiplier.toDouble());
+                  final normalized =
+                      (multiplier <= 0 ? 1.0 : multiplier.toDouble());
                   setModalState(() {
                     applyDetails();
                     current = _scaleEstimate(baseEstimate, normalized);
@@ -728,6 +791,23 @@ class _DietScreenState extends State<DietScreen> {
                     Text(
                       current.mealName,
                       style: Theme.of(context).textTheme.titleMedium,
+                    ),
+                    const SizedBox(height: 12),
+                    DropdownButtonFormField<DietMealType>(
+                      initialValue: selectedMealType,
+                      decoration: const InputDecoration(labelText: 'Meal type'),
+                      items: DietMealType.values
+                          .map(
+                            (value) => DropdownMenuItem(
+                              value: value,
+                              child: Text(value.label),
+                            ),
+                          )
+                          .toList(),
+                      onChanged: (value) {
+                        if (value == null) return;
+                        setModalState(() => selectedMealType = value);
+                      },
                     ),
                     const SizedBox(height: 12),
                     infoRow('Calories', current.calories),
@@ -878,9 +958,9 @@ class _DietScreenState extends State<DietScreen> {
                                 for (final entry in microControllers.entries) {
                                   entry.value.text =
                                       updatedMicros[entry.key]?.toStringAsFixed(
-                                        1,
-                                      ) ??
-                                      '';
+                                            1,
+                                          ) ??
+                                          '';
                                 }
                                 applyMultiplier();
                               }),
@@ -915,9 +995,9 @@ class _DietScreenState extends State<DietScreen> {
                                 for (final entry in microControllers.entries) {
                                   entry.value.text =
                                       updatedMicros[entry.key]?.toStringAsFixed(
-                                        1,
-                                      ) ??
-                                      '';
+                                            1,
+                                          ) ??
+                                          '';
                                 }
                                 applyMultiplier();
                               }),
@@ -935,7 +1015,8 @@ class _DietScreenState extends State<DietScreen> {
                             }
                             await _dietRepo.addEntry(
                               mealName: current.mealName,
-                              loggedAt: DateTime.now(),
+                              loggedAt: _loggedAtForDay(targetDay),
+                              mealType: selectedMealType,
                               calories: current.calories,
                               proteinG: current.proteinG,
                               carbsG: current.carbsG,
@@ -987,6 +1068,7 @@ class _DietScreenState extends State<DietScreen> {
     final notesController = TextEditingController(text: entry.notes ?? '');
     final refineController = TextEditingController();
     String? imagePath = entry.imagePath;
+    var selectedMealType = entry.mealType;
     var current = DietEstimate(
       mealName: entry.mealName,
       calories: entry.calories,
@@ -1076,6 +1158,23 @@ class _DietScreenState extends State<DietScreen> {
                     TextField(
                       controller: nameController,
                       decoration: const InputDecoration(labelText: 'Meal name'),
+                    ),
+                    const SizedBox(height: 8),
+                    DropdownButtonFormField<DietMealType>(
+                      initialValue: selectedMealType,
+                      decoration: const InputDecoration(labelText: 'Meal type'),
+                      items: DietMealType.values
+                          .map(
+                            (value) => DropdownMenuItem(
+                              value: value,
+                              child: Text(value.label),
+                            ),
+                          )
+                          .toList(),
+                      onChanged: (value) {
+                        if (value == null) return;
+                        setModalState(() => selectedMealType = value);
+                      },
                     ),
                     const SizedBox(height: 8),
                     _numberField(caloriesController, 'Calories'),
@@ -1193,6 +1292,7 @@ class _DietScreenState extends State<DietScreen> {
                                 mealName: nameController.text.trim().isEmpty
                                     ? entry.mealName
                                     : nameController.text.trim(),
+                                mealType: selectedMealType,
                                 calories: _parseAndClamp(
                                   caloriesController.text,
                                   max: 6000,
@@ -1321,14 +1421,441 @@ class _DietScreenState extends State<DietScreen> {
     return value.toStringAsFixed(1);
   }
 
+  DateTime _loggedAtForDay(DateTime targetDay) {
+    final now = DateTime.now();
+    return DateTime(
+      targetDay.year,
+      targetDay.month,
+      targetDay.day,
+      now.hour,
+      now.minute,
+      now.second,
+      now.millisecond,
+      now.microsecond,
+    );
+  }
+
+  int _periodShiftDays() {
+    switch (_timeScale) {
+      case DietTimeScale.day:
+        return 1;
+      case DietTimeScale.week:
+        return 7;
+      case DietTimeScale.month:
+        return 30;
+    }
+  }
+
+  Future<void> _shiftPeriod(int direction) async {
+    final today = _startOfDay(DateTime.now());
+    final candidate = _anchorDay.add(
+      Duration(days: _periodShiftDays() * direction),
+    );
+    if (candidate.isAfter(today)) return;
+    setState(() {
+      _anchorDay = candidate;
+      _loading = true;
+    });
+    await _load();
+  }
+
+  String _dayKey(DateTime day) {
+    return '${day.year.toString().padLeft(4, '0')}-'
+        '${day.month.toString().padLeft(2, '0')}-'
+        '${day.day.toString().padLeft(2, '0')}';
+  }
+
+  String _sectionKey(DateTime day, DietMealType mealType) {
+    return '${_dayKey(day)}:${mealType.storageValue}';
+  }
+
+  bool _isSectionCollapsed(DateTime day, DietMealType mealType) {
+    return _collapsedSections.contains(_sectionKey(day, mealType));
+  }
+
+  void _toggleSection(DateTime day, DietMealType mealType) {
+    final key = _sectionKey(day, mealType);
+    setState(() {
+      if (_collapsedSections.contains(key)) {
+        _collapsedSections.remove(key);
+      } else {
+        _collapsedSections.add(key);
+      }
+    });
+  }
+
+  List<_DietDayGroup> _buildDayGroups() {
+    final range = _rangeForScale();
+    final entriesByDay = <String, List<DietEntry>>{};
+    for (final meal in _allMeals) {
+      final day = _startOfDay(meal.loggedAt);
+      (entriesByDay[_dayKey(day)] ??= <DietEntry>[]).add(meal);
+    }
+
+    final groups = <_DietDayGroup>[];
+    for (var day = range.start;
+        day.isBefore(range.endExclusive);
+        day = day.add(const Duration(days: 1))) {
+      final entries = List<DietEntry>.from(
+        entriesByDay[_dayKey(day)] ?? const <DietEntry>[],
+      )..sort((a, b) => a.loggedAt.compareTo(b.loggedAt));
+      final byMealType = {
+        for (final mealType in DietMealType.values) mealType: <DietEntry>[],
+      };
+      for (final entry in entries) {
+        byMealType[entry.mealType]!.add(entry);
+      }
+      groups.add(_DietDayGroup(day: day, entriesByMealType: byMealType));
+    }
+    return groups;
+  }
+
+  Future<void> _promptAddMeal(
+    DietMealType mealType,
+    DateTime targetDay,
+  ) async {
+    final action = await showModalBottomSheet<_DietAddAction>(
+      context: context,
+      backgroundColor: Colors.transparent,
+      builder: (context) {
+        return Padding(
+          padding: EdgeInsets.only(
+            bottom: MediaQuery.of(context).viewInsets.bottom,
+            left: 16,
+            right: 16,
+            top: 24,
+          ),
+          child: GlassCard(
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('${mealType.label} options'),
+                const SizedBox(height: 12),
+                ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  leading: const Icon(Icons.search),
+                  title: const Text('Search food'),
+                  onTap: () =>
+                      Navigator.of(context).pop(_DietAddAction.searchFood),
+                ),
+                ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  leading: const Icon(Icons.photo_camera),
+                  title: const Text('Scan photo'),
+                  onTap: () =>
+                      Navigator.of(context).pop(_DietAddAction.scanPhoto),
+                ),
+                ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  leading: const Icon(Icons.qr_code_scanner),
+                  title: const Text('Quick barcode'),
+                  onTap: () =>
+                      Navigator.of(context).pop(_DietAddAction.barcode),
+                ),
+                ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  leading: const Icon(Icons.photo_library),
+                  title: const Text('Upload photo'),
+                  onTap: () =>
+                      Navigator.of(context).pop(_DietAddAction.uploadPhoto),
+                ),
+                ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  leading: const Icon(Icons.edit_note),
+                  title: const Text('Manual entry'),
+                  onTap: () =>
+                      Navigator.of(context).pop(_DietAddAction.manualEntry),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+
+    if (action == null) return;
+    switch (action) {
+      case _DietAddAction.searchFood:
+        await _openFoodDatabase(mealType: mealType, targetDay: targetDay);
+        return;
+      case _DietAddAction.scanPhoto:
+        await _useCamera(mealType: mealType, targetDay: targetDay);
+        return;
+      case _DietAddAction.barcode:
+        await _scanBarcode(mealType: mealType, targetDay: targetDay);
+        return;
+      case _DietAddAction.uploadPhoto:
+        await _pickMedia(mealType: mealType, targetDay: targetDay);
+        return;
+      case _DietAddAction.manualEntry:
+        await _addMeal(mealType: mealType, targetDay: targetDay);
+        return;
+    }
+  }
+
+  double _caloriesForEntries(Iterable<DietEntry> entries) {
+    return entries.fold(0, (total, entry) => total + (entry.calories ?? 0));
+  }
+
+  String _formatCalories(double value) {
+    if ((value - value.roundToDouble()).abs() < 0.05) {
+      return '${value.round()} kcal';
+    }
+    return '${value.toStringAsFixed(1)} kcal';
+  }
+
+  String _formatDate(DateTime day, {bool includeYear = false}) {
+    final month = _monthNames[day.month - 1];
+    final yearSuffix = includeYear ? ', ${day.year}' : '';
+    return '$month ${day.day}$yearSuffix';
+  }
+
+  String _formatDayHeading(DateTime day) {
+    final today = _startOfDay(DateTime.now());
+    final yesterday = today.subtract(const Duration(days: 1));
+    if (_dayKey(day) == _dayKey(today)) {
+      return 'Today, ${_formatDate(day)}';
+    }
+    if (_dayKey(day) == _dayKey(yesterday)) {
+      return 'Yesterday, ${_formatDate(day)}';
+    }
+    return _formatDate(day, includeYear: day.year != today.year);
+  }
+
+  String _formatRangeLabel() {
+    final range = _rangeForScale();
+    final lastDay = range.endExclusive.subtract(const Duration(days: 1));
+    if (_timeScale == DietTimeScale.day) {
+      return _formatDayHeading(lastDay);
+    }
+    final includeYear = range.start.year != lastDay.year ||
+        range.start.year != DateTime.now().year;
+    return '${_formatDate(range.start, includeYear: includeYear)} - '
+        '${_formatDate(lastDay, includeYear: includeYear)}';
+  }
+
+  IconData _mealTypeIcon(DietMealType mealType) {
+    switch (mealType) {
+      case DietMealType.breakfast:
+        return Icons.free_breakfast;
+      case DietMealType.lunch:
+        return Icons.lunch_dining;
+      case DietMealType.dinner:
+        return Icons.dinner_dining;
+      case DietMealType.snack:
+        return Icons.icecream;
+    }
+  }
+
+  String _formatMealTime(DateTime value) {
+    final hour = value.hour == 0
+        ? 12
+        : value.hour > 12
+            ? value.hour - 12
+            : value.hour;
+    final suffix = value.hour >= 12 ? 'PM' : 'AM';
+    final minute = value.minute.toString().padLeft(2, '0');
+    return '$hour:$minute $suffix';
+  }
+
+  Future<void> _confirmDeleteMeal(DietEntry meal) async {
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Delete meal?'),
+        content: const Text('This cannot be undone.'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('Cancel'),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text('Delete'),
+          ),
+        ],
+      ),
+    );
+    if (confirm != true) return;
+    await _deleteMeal(meal);
+    await _load();
+  }
+
+  Widget _buildMealTile(DietEntry meal) {
+    final hasImage =
+        meal.imagePath != null && File(meal.imagePath!).existsSync();
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 10),
+      child: GlassCard(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            if (hasImage)
+              ClipRRect(
+                borderRadius: BorderRadius.circular(12),
+                child: Image.file(
+                  File(meal.imagePath!),
+                  height: 180,
+                  width: double.infinity,
+                  fit: BoxFit.cover,
+                ),
+              ),
+            if (hasImage) const SizedBox(height: 10),
+            Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    meal.mealName,
+                    style: Theme.of(context).textTheme.titleSmall,
+                  ),
+                ),
+                IconButton(
+                  icon: const Icon(Icons.mic),
+                  onPressed: () => _editMeal(meal, autoVoice: true),
+                ),
+                IconButton(
+                  icon: const Icon(Icons.edit),
+                  onPressed: () => _editMeal(meal),
+                ),
+                IconButton(
+                  icon: const Icon(Icons.delete_outline),
+                  onPressed: () => _confirmDeleteMeal(meal),
+                ),
+              ],
+            ),
+            Text(
+              _formatMealTime(meal.loggedAt),
+              style: Theme.of(context).textTheme.bodySmall,
+            ),
+            if (meal.notes != null && meal.notes!.trim().isNotEmpty) ...[
+              const SizedBox(height: 6),
+              Text(
+                meal.notes!.trim(),
+                style: Theme.of(context).textTheme.bodySmall,
+              ),
+            ],
+            const SizedBox(height: 6),
+            Text(
+              _formatEntry(meal),
+              style: Theme.of(context).textTheme.bodySmall,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildMealSection(
+    DateTime day,
+    DietMealType mealType,
+    List<DietEntry> meals,
+  ) {
+    final collapsed = _isSectionCollapsed(day, mealType);
+    return Container(
+      margin: const EdgeInsets.only(bottom: 10),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: Theme.of(context).colorScheme.surface.withAlpha(120),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(
+          color: Theme.of(context).colorScheme.outlineVariant.withAlpha(100),
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(_mealTypeIcon(mealType)),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  mealType.label,
+                  style: Theme.of(context).textTheme.titleSmall,
+                ),
+              ),
+              Text(
+                _formatCalories(_caloriesForEntries(meals)),
+                style: Theme.of(context).textTheme.bodyMedium,
+              ),
+              IconButton(
+                onPressed: () => _promptAddMeal(mealType, day),
+                icon: const Icon(Icons.add),
+                tooltip: 'Add ${mealType.label.toLowerCase()}',
+              ),
+              IconButton(
+                onPressed: () => _toggleSection(day, mealType),
+                icon: Icon(
+                  collapsed
+                      ? Icons.keyboard_arrow_down
+                      : Icons.keyboard_arrow_up,
+                ),
+                tooltip: collapsed ? 'Expand' : 'Collapse',
+              ),
+            ],
+          ),
+          if (!collapsed) ...[
+            const SizedBox(height: 8),
+            if (meals.isEmpty)
+              OutlinedButton.icon(
+                onPressed: () => _promptAddMeal(mealType, day),
+                icon: const Icon(Icons.add),
+                label: Text('Add ${mealType.label.toLowerCase()}'),
+              )
+            else
+              ...meals.map(_buildMealTile),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _buildDayCard(_DietDayGroup group) {
+    return GlassCard(
+      padding: const EdgeInsets.all(16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  _formatDayHeading(group.day),
+                  style: Theme.of(context).textTheme.titleMedium,
+                ),
+              ),
+              Text(
+                _formatCalories(_caloriesForEntries(group.allEntries)),
+                style: Theme.of(context).textTheme.bodyMedium,
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          ...DietMealType.values.map(
+            (mealType) => _buildMealSection(
+              group.day,
+              mealType,
+              group.entriesByMealType[mealType] ?? const <DietEntry>[],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final goals = _buildGoals();
     final goalMultiplier = _timeScale == DietTimeScale.day
         ? 1
         : _timeScale == DietTimeScale.week
-        ? 7
-        : 30;
+            ? 7
+            : 30;
+    final dayGroups = _buildDayGroups();
+    final canMoveForward = _anchorDay.isBefore(_startOfDay(DateTime.now()));
     return Scaffold(
       appBar: AppBar(
         title: const Text('Diet'),
@@ -1353,8 +1880,30 @@ class _DietScreenState extends State<DietScreen> {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      const Text('Stats'),
+                      const Text('Goals'),
                       const SizedBox(height: 12),
+                      Row(
+                        children: [
+                          IconButton(
+                            onPressed: () => _shiftPeriod(-1),
+                            icon: const Icon(Icons.chevron_left),
+                          ),
+                          Expanded(
+                            child: Center(
+                              child: Text(
+                                _formatRangeLabel(),
+                                style: Theme.of(context).textTheme.titleSmall,
+                              ),
+                            ),
+                          ),
+                          IconButton(
+                            onPressed:
+                                canMoveForward ? () => _shiftPeriod(1) : null,
+                            icon: const Icon(Icons.chevron_right),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 8),
                       SegmentedButton<DietTimeScale>(
                         segments: const [
                           ButtonSegment(
@@ -1376,14 +1925,7 @@ class _DietScreenState extends State<DietScreen> {
                             _timeScale = value.first;
                             _loading = true;
                           });
-                          final summary = await _loadSummaryForScale();
-                          final micros = await _loadMicrosForScale();
-                          if (!mounted) return;
-                          setState(() {
-                            _summary = summary;
-                            _microsSummary = micros;
-                            _loading = false;
-                          });
+                          await _load();
                         },
                       ),
                       const SizedBox(height: 12),
@@ -1452,151 +1994,173 @@ class _DietScreenState extends State<DietScreen> {
                   ),
                 ),
                 const SizedBox(height: 12),
-                GlassCard(
-                  padding: const EdgeInsets.all(16),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      const Text('Meals'),
-                      const SizedBox(height: 8),
-                      Row(
-                        children: [
-                          Expanded(
-                            child: ElevatedButton.icon(
-                              onPressed: _openFoodDatabase,
-                              icon: const Icon(Icons.search),
-                              label: const Text('Search food'),
-                            ),
-                          ),
-                          const SizedBox(width: 8),
-                          Expanded(
-                            child: FilledButton.tonalIcon(
-                              onPressed: _useCamera,
-                              icon: const Icon(Icons.photo_camera),
-                              label: const Text('Scan photo'),
-                            ),
-                          ),
-                        ],
-                      ),
-                      const SizedBox(height: 8),
-                      Wrap(
-                        spacing: 8,
-                        runSpacing: 8,
-                        children: [
-                          OutlinedButton.icon(
-                            onPressed: _scanBarcode,
-                            icon: const Icon(Icons.qr_code_scanner),
-                            label: const Text('Quick barcode'),
-                          ),
-                          OutlinedButton.icon(
-                            onPressed: _pickMedia,
-                            icon: const Icon(Icons.photo_library),
-                            label: const Text('Upload photo'),
-                          ),
-                        ],
-                      ),
-                      const SizedBox(height: 12),
-                      if (_allMeals.isEmpty)
-                        const Text('No meals logged yet.')
-                      else
-                        ..._allMeals.map(
-                          (meal) => GlassCard(
-                            padding: const EdgeInsets.all(12),
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                if (meal.imagePath != null &&
-                                    File(meal.imagePath!).existsSync())
-                                  ClipRRect(
-                                    borderRadius: BorderRadius.circular(12),
-                                    child: Image.file(
-                                      File(meal.imagePath!),
-                                      height: 200,
-                                      width: double.infinity,
-                                      fit: BoxFit.cover,
-                                    ),
-                                  ),
-                                if (meal.imagePath != null &&
-                                    File(meal.imagePath!).existsSync())
-                                  const SizedBox(height: 10),
-                                Row(
-                                  children: [
-                                    Expanded(
-                                      child: Text(
-                                        meal.mealName,
-                                        style: Theme.of(
-                                          context,
-                                        ).textTheme.titleSmall,
-                                      ),
-                                    ),
-                                    IconButton(
-                                      icon: const Icon(Icons.mic),
-                                      onPressed: () =>
-                                          _editMeal(meal, autoVoice: true),
-                                    ),
-                                    IconButton(
-                                      icon: const Icon(Icons.edit),
-                                      onPressed: () => _editMeal(meal),
-                                    ),
-                                    IconButton(
-                                      icon: const Icon(Icons.delete_outline),
-                                      onPressed: () async {
-                                        final confirm = await showDialog<bool>(
-                                          context: context,
-                                          builder: (context) => AlertDialog(
-                                            title: const Text('Delete meal?'),
-                                            content: const Text(
-                                              'This cannot be undone.',
-                                            ),
-                                            actions: [
-                                              TextButton(
-                                                onPressed: () => Navigator.of(
-                                                  context,
-                                                ).pop(false),
-                                                child: const Text('Cancel'),
-                                              ),
-                                              ElevatedButton(
-                                                onPressed: () => Navigator.of(
-                                                  context,
-                                                ).pop(true),
-                                                child: const Text('Delete'),
-                                              ),
-                                            ],
-                                          ),
-                                        );
-                                        if (confirm != true) return;
-                                        await _deleteMeal(meal);
-                                        await _load();
-                                      },
-                                    ),
-                                  ],
-                                ),
-                                Text(
-                                  '${meal.loggedAt.month}/${meal.loggedAt.day} • ${meal.loggedAt.hour.toString().padLeft(2, '0')}:${meal.loggedAt.minute.toString().padLeft(2, '0')}',
-                                  style: Theme.of(context).textTheme.bodySmall,
-                                ),
-                                if (meal.notes != null &&
-                                    meal.notes!.trim().isNotEmpty) ...[
-                                  const SizedBox(height: 6),
-                                  Text(
-                                    meal.notes!.trim(),
-                                    style: Theme.of(
-                                      context,
-                                    ).textTheme.bodySmall,
-                                  ),
-                                ],
-                                const SizedBox(height: 6),
-                                Text(
-                                  _formatEntry(meal),
-                                  style: Theme.of(context).textTheme.bodySmall,
-                                ),
-                              ],
-                            ),
-                          ),
-                        ),
-                    ],
+                ...dayGroups.map(
+                  (group) => Padding(
+                    padding: const EdgeInsets.only(bottom: 12),
+                    child: _buildDayCard(group),
                   ),
                 ),
+                if (_showLegacyMealList)
+                  GlassCard(
+                    padding: const EdgeInsets.all(16),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Text('Meals'),
+                        const SizedBox(height: 8),
+                        Row(
+                          children: [
+                            Expanded(
+                              child: ElevatedButton.icon(
+                                onPressed: () => _openFoodDatabase(
+                                  mealType: DietMealType.snack,
+                                  targetDay: _anchorDay,
+                                ),
+                                icon: const Icon(Icons.search),
+                                label: const Text('Search food'),
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            Expanded(
+                              child: FilledButton.tonalIcon(
+                                onPressed: () => _useCamera(
+                                  mealType: DietMealType.snack,
+                                  targetDay: _anchorDay,
+                                ),
+                                icon: const Icon(Icons.photo_camera),
+                                label: const Text('Scan photo'),
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 8),
+                        Wrap(
+                          spacing: 8,
+                          runSpacing: 8,
+                          children: [
+                            OutlinedButton.icon(
+                              onPressed: () => _scanBarcode(
+                                mealType: DietMealType.snack,
+                                targetDay: _anchorDay,
+                              ),
+                              icon: const Icon(Icons.qr_code_scanner),
+                              label: const Text('Quick barcode'),
+                            ),
+                            OutlinedButton.icon(
+                              onPressed: () => _pickMedia(
+                                mealType: DietMealType.snack,
+                                targetDay: _anchorDay,
+                              ),
+                              icon: const Icon(Icons.photo_library),
+                              label: const Text('Upload photo'),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 12),
+                        if (_allMeals.isEmpty)
+                          const Text('No meals logged yet.')
+                        else
+                          ..._allMeals.map(
+                            (meal) => GlassCard(
+                              padding: const EdgeInsets.all(12),
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  if (meal.imagePath != null &&
+                                      File(meal.imagePath!).existsSync())
+                                    ClipRRect(
+                                      borderRadius: BorderRadius.circular(12),
+                                      child: Image.file(
+                                        File(meal.imagePath!),
+                                        height: 200,
+                                        width: double.infinity,
+                                        fit: BoxFit.cover,
+                                      ),
+                                    ),
+                                  if (meal.imagePath != null &&
+                                      File(meal.imagePath!).existsSync())
+                                    const SizedBox(height: 10),
+                                  Row(
+                                    children: [
+                                      Expanded(
+                                        child: Text(
+                                          meal.mealName,
+                                          style: Theme.of(
+                                            context,
+                                          ).textTheme.titleSmall,
+                                        ),
+                                      ),
+                                      IconButton(
+                                        icon: const Icon(Icons.mic),
+                                        onPressed: () =>
+                                            _editMeal(meal, autoVoice: true),
+                                      ),
+                                      IconButton(
+                                        icon: const Icon(Icons.edit),
+                                        onPressed: () => _editMeal(meal),
+                                      ),
+                                      IconButton(
+                                        icon: const Icon(Icons.delete_outline),
+                                        onPressed: () async {
+                                          final confirm =
+                                              await showDialog<bool>(
+                                            context: context,
+                                            builder: (context) => AlertDialog(
+                                              title: const Text('Delete meal?'),
+                                              content: const Text(
+                                                'This cannot be undone.',
+                                              ),
+                                              actions: [
+                                                TextButton(
+                                                  onPressed: () => Navigator.of(
+                                                    context,
+                                                  ).pop(false),
+                                                  child: const Text('Cancel'),
+                                                ),
+                                                ElevatedButton(
+                                                  onPressed: () => Navigator.of(
+                                                    context,
+                                                  ).pop(true),
+                                                  child: const Text('Delete'),
+                                                ),
+                                              ],
+                                            ),
+                                          );
+                                          if (confirm != true) return;
+                                          await _deleteMeal(meal);
+                                          await _load();
+                                        },
+                                      ),
+                                    ],
+                                  ),
+                                  Text(
+                                    '${meal.loggedAt.month}/${meal.loggedAt.day} • ${meal.loggedAt.hour.toString().padLeft(2, '0')}:${meal.loggedAt.minute.toString().padLeft(2, '0')}',
+                                    style:
+                                        Theme.of(context).textTheme.bodySmall,
+                                  ),
+                                  if (meal.notes != null &&
+                                      meal.notes!.trim().isNotEmpty) ...[
+                                    const SizedBox(height: 6),
+                                    Text(
+                                      meal.notes!.trim(),
+                                      style: Theme.of(
+                                        context,
+                                      ).textTheme.bodySmall,
+                                    ),
+                                  ],
+                                  const SizedBox(height: 6),
+                                  Text(
+                                    _formatEntry(meal),
+                                    style:
+                                        Theme.of(context).textTheme.bodySmall,
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                      ],
+                    ),
+                  ),
               ],
             ),
         ],
@@ -1620,7 +2184,7 @@ class _DietScreenState extends State<DietScreen> {
           .join(', ');
       parts.add('Micros: $shown');
     }
-    return parts.join(' • ');
+    return parts.join(' | ');
   }
 
   // ignore: unused_element
@@ -1913,6 +2477,41 @@ class DietGoals {
 enum DietTimeScale { day, week, month }
 
 enum DietNutrientView { macros, micros, vitamins }
+
+enum _DietAddAction { searchFood, scanPhoto, barcode, uploadPhoto, manualEntry }
+
+class _DietRange {
+  const _DietRange({required this.start, required this.endExclusive});
+
+  final DateTime start;
+  final DateTime endExclusive;
+}
+
+class _DietDayGroup {
+  const _DietDayGroup({required this.day, required this.entriesByMealType});
+
+  final DateTime day;
+  final Map<DietMealType, List<DietEntry>> entriesByMealType;
+
+  Iterable<DietEntry> get allEntries => entriesByMealType.values.expand(
+        (entries) => entries,
+      );
+}
+
+const List<String> _monthNames = [
+  'Jan',
+  'Feb',
+  'Mar',
+  'Apr',
+  'May',
+  'Jun',
+  'Jul',
+  'Aug',
+  'Sep',
+  'Oct',
+  'Nov',
+  'Dec',
+];
 
 const List<String> _defaultMicros = [
   'Potassium (mg)',
