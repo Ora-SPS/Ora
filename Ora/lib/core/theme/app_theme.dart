@@ -55,6 +55,9 @@ class AppTheme {
         backgroundColor: surfaceAlt.withOpacity(0.95),
         behavior: SnackBarBehavior.floating,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+        contentTextStyle: const TextStyle(color: Colors.white),
+        actionTextColor: Colors.white,
+        disabledActionTextColor: Colors.white70,
       ),
       bottomNavigationBarTheme: BottomNavigationBarThemeData(
         backgroundColor: surface.withOpacity(0.82),

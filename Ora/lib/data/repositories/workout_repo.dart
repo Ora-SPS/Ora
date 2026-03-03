@@ -107,6 +107,40 @@ class WorkoutRepo {
     });
   }
 
+  Future<Map<String, Object?>?> getSessionExerciseById(int id) async {
+    final db = await _db.database;
+    final rows = await db.query(
+      'session_exercise',
+      where: 'id = ?',
+      whereArgs: [id],
+      limit: 1,
+    );
+    return rows.isEmpty ? null : rows.first;
+  }
+
+  Future<void> insertSessionExerciseWithId(Map<String, Object?> row) async {
+    final db = await _db.database;
+    await db.transaction((txn) async {
+      final workoutSessionId = row['workout_session_id'] as int?;
+      final orderIndex = row['order_index'] as int?;
+      if (workoutSessionId != null && orderIndex != null) {
+        await txn.rawUpdate(
+          '''
+UPDATE session_exercise
+SET order_index = order_index + 1
+WHERE workout_session_id = ? AND order_index >= ?
+''',
+          [workoutSessionId, orderIndex],
+        );
+      }
+      await txn.insert(
+        'session_exercise',
+        row,
+        conflictAlgorithm: ConflictAlgorithm.replace,
+      );
+    });
+  }
+
   Future<void> deleteSessionExercise(int sessionExerciseId) async {
     final db = await _db.database;
     await db.transaction((txn) async {
@@ -348,7 +382,7 @@ ORDER BY se.set_index ASC
   Future<Map<String, Object?>?> getSessionHeader(int sessionId) async {
     final db = await _db.database;
     final rows = await db.rawQuery(
-        '''\nSELECT ws.id,\n       ws.started_at,\n       ws.ended_at,\n       ws.program_id,\n       ws.program_day_id,\n       p.name as program_name,\n       pd.day_name,\n       pd.day_index\nFROM workout_session ws\nLEFT JOIN program p ON p.id = ws.program_id\nLEFT JOIN program_day pd ON pd.id = ws.program_day_id\nWHERE ws.id = ?\nLIMIT 1\n''',
+        '''\nSELECT ws.id,\n       ws.started_at,\n       ws.ended_at,\n       ws.program_id,\n       ws.program_day_id,\n       ws.notes,\n       p.name as program_name,\n       pd.day_name,\n       pd.day_index\nFROM workout_session ws\nLEFT JOIN program p ON p.id = ws.program_id\nLEFT JOIN program_day pd ON pd.id = ws.program_day_id\nWHERE ws.id = ?\nLIMIT 1\n''',
         [sessionId]);
     if (rows.isEmpty) return null;
     return rows.first;

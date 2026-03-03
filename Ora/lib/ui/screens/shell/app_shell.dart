@@ -41,7 +41,8 @@ class _AppShellState extends State<AppShell> {
     if (_index > maxIndex) {
       _index = maxIndex;
     }
-    final navHeight = _BottomNavBar.navHeight + MediaQuery.of(context).padding.bottom;
+    final navHeight =
+        _BottomNavBar.navHeight + MediaQuery.of(context).padding.bottom;
     return Scaffold(
       body: Stack(
         children: [
@@ -89,13 +90,15 @@ class _AppShellState extends State<AppShell> {
     _loadAppearanceAccess();
     _loadActiveSession();
     AppShellController.instance.tabIndex.addListener(_handleTabChange);
-    AppShellController.instance.appearanceEnabled.addListener(_handleAppearanceToggle);
+    AppShellController.instance.appearanceEnabled
+        .addListener(_handleAppearanceToggle);
   }
 
   @override
   void dispose() {
     AppShellController.instance.tabIndex.removeListener(_handleTabChange);
-    AppShellController.instance.appearanceEnabled.removeListener(_handleAppearanceToggle);
+    AppShellController.instance.appearanceEnabled
+        .removeListener(_handleAppearanceToggle);
     super.dispose();
   }
 
@@ -140,7 +143,7 @@ class _AppShellState extends State<AppShell> {
     final contextData = await _sessionService.resumeActiveSession();
     if (contextData == null || !mounted) return;
     await Navigator.of(context).push(
-      MaterialPageRoute(builder: (_) => SessionScreen(contextData: contextData)),
+      SessionScreen.route(contextData: contextData),
     );
   }
 }
@@ -241,7 +244,8 @@ class _BottomNavBar extends StatelessWidget {
       _NavItemData(index: 1, icon: Icons.restaurant, label: 'Diet'),
     ];
     if (appearanceEnabled) {
-      items.add(_NavItemData(index: 2, icon: Icons.face_retouching_natural, label: 'Appearance'));
+      items.add(_NavItemData(
+          index: 2, icon: Icons.face_retouching_natural, label: 'Appearance'));
       items.add(_NavItemData(index: 3, icon: Icons.person, label: 'Profile'));
     } else {
       items.add(_NavItemData(index: 2, icon: Icons.person, label: 'Profile'));
@@ -316,7 +320,8 @@ class _BottomNavClipper extends CustomClipper<Path> {
     final path = Path();
     path.moveTo(0, 0);
     path.lineTo(mid - notchRadius, 0);
-    path.quadraticBezierTo(mid - notchRadius * 0.6, 0, mid - notchRadius * 0.6, notchDepth * 0.5);
+    path.quadraticBezierTo(
+        mid - notchRadius * 0.6, 0, mid - notchRadius * 0.6, notchDepth * 0.5);
     path.arcToPoint(
       Offset(mid + notchRadius * 0.6, notchDepth * 0.5),
       radius: const Radius.circular(notchRadius),
