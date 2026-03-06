@@ -73,9 +73,7 @@ class _ExerciseCatalogScreenState extends State<ExerciseCatalogScreen> {
     if (!enabled || apiKey == null || apiKey.trim().isEmpty) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-            content: Text(
-                'Cloud parsing and an API key are required to fill muscles.')),
+        const SnackBar(content: Text('Cloud parsing and an API key are required to fill muscles.')),
       );
       return;
     }
@@ -134,9 +132,7 @@ class _ExerciseCatalogScreenState extends State<ExerciseCatalogScreen> {
       _isFilling = false;
     });
     ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-          content: Text(
-              'Filled muscles for $filled of ${missing.length} exercises.')),
+      SnackBar(content: Text('Filled muscles for $filled of ${missing.length} exercises.')),
     );
   }
 
@@ -158,9 +154,7 @@ class _ExerciseCatalogScreenState extends State<ExerciseCatalogScreen> {
                 IconButton(
                   tooltip: 'Fill missing muscles (cloud)',
                   onPressed: _isFilling ? null : _fillMissingMuscles,
-                  icon: _isFilling
-                      ? const Icon(Icons.sync)
-                      : const Icon(Icons.auto_fix_high),
+                  icon: _isFilling ? const Icon(Icons.sync) : const Icon(Icons.auto_fix_high),
                 ),
                 const SizedBox(width: 72),
               ],
@@ -178,13 +172,11 @@ class _ExerciseCatalogScreenState extends State<ExerciseCatalogScreen> {
                       Expanded(
                         child: _activeView == 0
                             ? ElevatedButton(
-                                onPressed: () =>
-                                    setState(() => _activeView = 0),
+                                onPressed: () => setState(() => _activeView = 0),
                                 child: const Text('Catalog'),
                               )
                             : OutlinedButton(
-                                onPressed: () =>
-                                    setState(() => _activeView = 0),
+                                onPressed: () => setState(() => _activeView = 0),
                                 child: const Text('Catalog'),
                               ),
                       ),
@@ -192,13 +184,11 @@ class _ExerciseCatalogScreenState extends State<ExerciseCatalogScreen> {
                       Expanded(
                         child: _activeView == 1
                             ? ElevatedButton(
-                                onPressed: () =>
-                                    setState(() => _activeView = 1),
+                                onPressed: () => setState(() => _activeView = 1),
                                 child: const Text('History'),
                               )
                             : OutlinedButton(
-                                onPressed: () =>
-                                    setState(() => _activeView = 1),
+                                onPressed: () => setState(() => _activeView = 1),
                                 child: const Text('History'),
                               ),
                       ),
@@ -233,14 +223,6 @@ class _ExerciseCatalogScreenState extends State<ExerciseCatalogScreen> {
                             primary == null || primary.trim().isEmpty
                                 ? (item['equipment_type'] as String)
                                 : '${item['equipment_type']} • $primary',
-                            style:
-                                Theme.of(context).textTheme.bodySmall?.copyWith(
-                                      color: Theme.of(context)
-                                          .colorScheme
-                                          .onSurface
-                                          .withValues(alpha: 0.62),
-                                      fontSize: 12,
-                                    ),
                           ),
                           onTap: selectionMode
                               ? () => Navigator.of(context).pop(
@@ -274,8 +256,7 @@ class _ExerciseCatalogScreenState extends State<ExerciseCatalogScreen> {
                   Padding(
                     padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
                     child: GlassCard(
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 16, vertical: 12),
+                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
                       child: Row(
                         children: [
                           const SizedBox(
@@ -285,8 +266,7 @@ class _ExerciseCatalogScreenState extends State<ExerciseCatalogScreen> {
                           ),
                           const SizedBox(width: 12),
                           Expanded(
-                            child: Text(
-                                'Filling muscles: $_fillDone / $_fillTotal'),
+                            child: Text('Filling muscles: $_fillDone / $_fillTotal'),
                           ),
                         ],
                       ),
