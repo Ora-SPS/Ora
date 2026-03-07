@@ -61,7 +61,6 @@ class ProgramsScreen extends StatefulWidget {
 
 class _ProgramsScreenState extends State<ProgramsScreen>
     with WidgetsBindingObserver {
-  static const int _createProgramId = -1;
   static const String _raulTemplateAssetPath =
       'Examples/Raul Split - HILV Program.xlsx';
   static const String _raulTemplateFileName = 'Raul Split - HILV Program.xlsx';
@@ -167,15 +166,20 @@ class _ProgramsScreenState extends State<ProgramsScreen>
     final service = _ensureStepsService();
     final shouldPrompt = await service.consumeFirstRunPrompt();
     if (!mounted || !shouldPrompt) return;
+    final title = service.lockedStateTitle;
+    final actionLabel = service.lockedStateActionLabel;
+    final message = service.usesTrackerLinkFlow
+        ? 'Link Fitbit or another step tracker so the Training page can show your steps and progress.'
+        : 'Allow step access so the Training page can show your steps and progress.';
     final enable = await showDialog<bool>(
       context: context,
       barrierDismissible: false,
       builder: (dialogContext) {
         final theme = Theme.of(dialogContext);
         return AlertDialog(
-          title: const Text('Enable step access'),
+          title: Text(title),
           content: Text(
-            'Allow step access so the Training page can show your steps and progress.',
+            message,
             style: theme.textTheme.bodyMedium,
           ),
           actions: [
@@ -185,14 +189,186 @@ class _ProgramsScreenState extends State<ProgramsScreen>
             ),
             ElevatedButton(
               onPressed: () => Navigator.of(dialogContext).pop(true),
-              child: const Text('Enable'),
+              child: Text(actionLabel),
             ),
           ],
         );
       },
     );
     if (!mounted || enable != true) return;
+    await _handleStepsAccessAction();
+  }
+
+  Future<void> _handleStepsAccessAction() async {
+    final service = _ensureStepsService();
+    if (service.usesTrackerLinkFlow) {
+      await _showAndroidTrackerLinkSheet(service);
+      return;
+    }
     await service.requestAccess();
+  }
+
+  Future<void> _showAndroidTrackerLinkSheet(StepsService service) async {
+    await showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: Colors.transparent,
+      isScrollControlled: true,
+      builder: (sheetContext) {
+        return SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(16, 16, 16, 24),
+            child: GlassCard(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text('Link step tracker'),
+                  const SizedBox(height: 8),
+                  Text(
+                    'Start with Fitbit. We will add more tracker links here.',
+                    style: Theme.of(sheetContext).textTheme.bodyMedium,
+                  ),
+                  const SizedBox(height: 12),
+                  SizedBox(
+                    width: double.infinity,
+                    child: ElevatedButton.icon(
+                      onPressed: () {
+                        Navigator.of(sheetContext).pop();
+                        WidgetsBinding.instance.addPostFrameCallback((_) {
+                          if (!mounted) return;
+                          unawaited(_linkFitbitTracker(service));
+                        });
+                      },
+                      icon: const Icon(Icons.favorite_outline),
+                      label: const Text('Link Fitbit'),
+                    ),
+                  ),
+                  const SizedBox(height: 10),
+                  SizedBox(
+                    width: double.infinity,
+                    child: OutlinedButton.icon(
+                      onPressed: () {
+                        Navigator.of(sheetContext).pop();
+                        unawaited(service.requestAccess());
+                      },
+                      icon: const Icon(Icons.health_and_safety_outlined),
+                      label: const Text('Open Health Connect'),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Future<void> _linkFitbitTracker(StepsService service) async {
+    final configured = await _ensureFitbitClientConfigured(service);
+    if (!mounted || !configured) return;
+    final linked = await service.linkFitbitTracker();
+    if (!mounted) return;
+    final message = linked
+        ? 'Fitbit linked. Steps are now syncing.'
+        : (service.statusMessage ?? 'Unable to link Fitbit right now.');
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(message)),
+    );
+  }
+
+  Future<bool> _ensureFitbitClientConfigured(StepsService service) async {
+    final alreadyConfigured = await service.isFitbitClientConfigured();
+    if (alreadyConfigured) {
+      return true;
+    }
+    if (!mounted) return false;
+    final currentClientId = await service.getFitbitClientId();
+    if (!mounted) return false;
+    final controller = TextEditingController(text: currentClientId ?? '');
+    final saved = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) {
+        return AlertDialog(
+          title: const Text('Fitbit setup'),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'Enter the Fitbit Client ID once. After this, linking is one tap.',
+                ),
+                const SizedBox(height: 10),
+                TextField(
+                  controller: controller,
+                  decoration: const InputDecoration(
+                    labelText: 'Fitbit Client ID',
+                    hintText: 'e.g. 23PABC',
+                  ),
+                  textInputAction: TextInputAction.done,
+                  autofocus: true,
+                ),
+                const SizedBox(height: 14),
+                const Text(
+                  'How to find your Fitbit Client ID',
+                  style: TextStyle(fontWeight: FontWeight.w700),
+                ),
+                const SizedBox(height: 8),
+                const Text(
+                  '1. Open Fitbit Developer and sign in with your Fitbit account.\n'
+                  '   URL: https://dev.fitbit.com/apps\n'
+                  '2. Go to "Manage My Apps".\n'
+                  '3. If you already have an app for Ora, open it.\n'
+                  '4. If not, choose "Register an App" and create one.\n'
+                  '5. In your app settings, set Redirect URI to exactly:\n'
+                  '   orafitbit://auth\n'
+                  '6. Save the app.\n'
+                  '7. Open the app details and copy the value labeled "Client ID".\n'
+                  '8. Paste that Client ID here and tap Save.\n\n'
+                  'Important: do not paste your profile/user ID or Client Secret.',
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(false),
+              child: const Text('Cancel'),
+            ),
+            ElevatedButton(
+              onPressed: () => Navigator.of(dialogContext).pop(true),
+              child: const Text('Save'),
+            ),
+          ],
+        );
+      },
+    );
+    final input = controller.text.trim();
+    controller.dispose();
+    if (saved != true) {
+      return false;
+    }
+    if (input.isEmpty) {
+      if (!mounted) return false;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Fitbit Client ID is required.')),
+      );
+      return false;
+    }
+    if (input.contains(' ')) {
+      if (!mounted) return false;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'Client ID should not contain spaces. Paste only the Fitbit Client ID value.',
+          ),
+        ),
+      );
+      return false;
+    }
+    await service.setFitbitClientId(input);
+    return true;
   }
 
   Future<void> _openStepsDetails() async {
@@ -685,80 +861,6 @@ class _ProgramsScreenState extends State<ProgramsScreen>
     );
   }
 
-  Future<void> _startManualDay({int? programId}) async {
-    final selectedProgramId = programId ?? _selectedProgramId;
-    if (selectedProgramId == null) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Pick a program first.')),
-      );
-      return;
-    }
-    await Navigator.of(context).push(
-      MaterialPageRoute(
-          builder: (_) => DayPickerScreen(programId: selectedProgramId)),
-    );
-    await _syncActiveSessionBanner();
-    if (!mounted) return;
-    setState(() {});
-  }
-
-  Future<void> _startSmartDay({int? programId}) async {
-    final selectedProgramId = programId ?? _selectedProgramId;
-    if (selectedProgramId == null) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Pick a program first.')),
-      );
-      return;
-    }
-    final days = await _programRepo.getProgramDays(selectedProgramId);
-    if (days.isEmpty) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-            content: Text('No days yet. Add one in the program editor.')),
-      );
-      return;
-    }
-    final sortedDays = List<Map<String, Object?>>.from(days)
-      ..sort(
-          (a, b) => (a['day_index'] as int).compareTo(b['day_index'] as int));
-    final trainingDays = <Map<String, Object?>>[];
-    for (final day in sortedDays) {
-      final dayId = day['id'] as int;
-      final exercises = await _programRepo.getProgramDayExercises(dayId);
-      if (exercises.isNotEmpty) {
-        trainingDays.add(day);
-      }
-    }
-    if (trainingDays.isEmpty) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('No exercises found in this program.')),
-      );
-      return;
-    }
-    final lastIndex =
-        await _workoutRepo.getLastCompletedDayIndex(selectedProgramId);
-    final nextFromIndex = lastIndex == null ? 0 : lastIndex + 1;
-    var day = trainingDays.first;
-    for (final candidate in trainingDays) {
-      final idx = candidate['day_index'] as int;
-      if (idx >= nextFromIndex) {
-        day = candidate;
-        break;
-      }
-    }
-    final contextData = await _sessionService.startSessionForProgramDay(
-      programId: selectedProgramId,
-      programDayId: day['id'] as int,
-    );
-    if (!mounted) return;
-    await Navigator.of(context).push(
-      SessionScreen.route(contextData: contextData),
-    );
-    await _syncActiveSessionBanner();
-  }
-
   Future<void> _uploadProgram() async {
     final picked = await FilePicker.platform.pickFiles(
       type: FileType.custom,
@@ -879,152 +981,6 @@ class _ProgramsScreenState extends State<ProgramsScreen>
     return base.substring(dot);
   }
 
-  Future<void> _showProgramDaySheet() async {
-    final programs = await _programRepo.getPrograms();
-    if (!mounted) return;
-    int? selectedProgramId = _selectedProgramId;
-    if (programs.isNotEmpty &&
-        (selectedProgramId == null ||
-            !programs.any((p) => p['id'] == selectedProgramId))) {
-      selectedProgramId = programs.first['id'] as int;
-    }
-    await showModalBottomSheet<void>(
-      context: context,
-      isScrollControlled: true,
-      backgroundColor: Colors.transparent,
-      builder: (context) {
-        return StatefulBuilder(
-          builder: (context, setModalState) {
-            return SafeArea(
-              child: SingleChildScrollView(
-                padding: const EdgeInsets.fromLTRB(16, 16, 16, 24),
-                child: GlassCard(
-                  padding: const EdgeInsets.all(16),
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      const Text('Start Program Day'),
-                      const SizedBox(height: 12),
-                      if (programs.isEmpty) ...[
-                        Text(
-                          'No programs yet. Create or upload one to continue.',
-                          style: Theme.of(context).textTheme.bodySmall,
-                        ),
-                        const SizedBox(height: 12),
-                        SizedBox(
-                          width: double.infinity,
-                          child: ElevatedButton.icon(
-                            onPressed: () async {
-                              Navigator.of(context).pop();
-                              await _createProgram();
-                            },
-                            icon: const Icon(Icons.add),
-                            label: const Text('Create New Program'),
-                          ),
-                        ),
-                        const SizedBox(height: 10),
-                        SizedBox(
-                          width: double.infinity,
-                          child: OutlinedButton.icon(
-                            onPressed: () async {
-                              Navigator.of(context).pop();
-                              await _uploadProgram();
-                            },
-                            icon: const Icon(Icons.upload_file),
-                            label: const Text('Upload Program'),
-                          ),
-                        ),
-                      ] else ...[
-                        InputDecorator(
-                          decoration: const InputDecoration(
-                            labelText: 'Program',
-                          ),
-                          child: DropdownButtonHideUnderline(
-                            child: DropdownButton<int>(
-                              value: selectedProgramId,
-                              menuMaxHeight: 320,
-                              isExpanded: true,
-                              items: programs
-                                  .map(
-                                (program) => DropdownMenuItem<int>(
-                                  value: program['id'] as int,
-                                  child: Text(program['name'] as String),
-                                ),
-                              )
-                                  .followedBy(
-                                const [
-                                  DropdownMenuItem<int>(
-                                    value: _createProgramId,
-                                    child: Text('Create new program...'),
-                                  ),
-                                ],
-                              ).toList(),
-                              onChanged: (value) {
-                                if (value == null) return;
-                                if (value == _createProgramId) {
-                                  Navigator.of(context).pop();
-                                  Future.microtask(() => _createProgram());
-                                  return;
-                                }
-                                final program = programs
-                                    .firstWhere((p) => p['id'] == value);
-                                setModalState(() {
-                                  selectedProgramId = value;
-                                });
-                                setState(() {
-                                  _selectedProgramId = value;
-                                  _selectedProgramName =
-                                      program['name'] as String;
-                                });
-                              },
-                            ),
-                          ),
-                        ),
-                        const SizedBox(height: 12),
-                        Row(
-                          children: [
-                            Expanded(
-                              child: ElevatedButton.icon(
-                                onPressed: selectedProgramId == null
-                                    ? null
-                                    : () async {
-                                        Navigator.of(context).pop();
-                                        await _startManualDay(
-                                            programId: selectedProgramId);
-                                      },
-                                icon: const Icon(Icons.view_list),
-                                label: const Text('Manual Day'),
-                              ),
-                            ),
-                            const SizedBox(width: 12),
-                            Expanded(
-                              child: ElevatedButton.icon(
-                                onPressed: selectedProgramId == null
-                                    ? null
-                                    : () async {
-                                        Navigator.of(context).pop();
-                                        await _startSmartDay(
-                                            programId: selectedProgramId);
-                                      },
-                                icon: const Icon(Icons.auto_awesome),
-                                label: const Text('Smart Day'),
-                              ),
-                            ),
-                          ],
-                        ),
-                      ],
-                    ],
-                  ),
-                ),
-              ),
-            );
-          },
-        );
-      },
-    );
-  }
-
   Widget _buildSelectedMuscleStats(String muscle) {
     final stats = _muscleStats[muscle] ??
         const _MuscleStats(pr: '—', volume: '—', prCount: '—');
@@ -1126,6 +1082,7 @@ class _ProgramsScreenState extends State<ProgramsScreen>
                   StepsSummaryCard(
                     stepsService: _ensureStepsService(),
                     onOpenDetails: _openStepsDetails,
+                    onRequestAccess: _handleStepsAccessAction,
                   ),
                   const SizedBox(height: 12),
                   GlassCard(
@@ -1153,20 +1110,6 @@ class _ProgramsScreenState extends State<ProgramsScreen>
                                   .textTheme
                                   .titleMedium
                                   ?.copyWith(fontWeight: FontWeight.w700),
-                            ),
-                          ),
-                        ),
-                        const SizedBox(height: 12),
-                        SizedBox(
-                          width: double.infinity,
-                          child: OutlinedButton.icon(
-                            onPressed: () => _showProgramDaySheet(),
-                            icon: const Icon(Icons.calendar_today),
-                            label: const Text('Start Program Day'),
-                            style: OutlinedButton.styleFrom(
-                              shape: RoundedRectangleBorder(
-                                borderRadius: BorderRadius.circular(10),
-                              ),
                             ),
                           ),
                         ),
@@ -1243,34 +1186,50 @@ class _ProgramsScreenState extends State<ProgramsScreen>
                                   itemBuilder: (context, index) {
                                     final program = programs[index];
                                     final id = program['id'] as int;
-                                    return GlassCard(
-                                      padding: EdgeInsets.zero,
+                                    final colorScheme =
+                                        Theme.of(context).colorScheme;
+                                    return Material(
+                                      color: colorScheme.primary,
+                                      borderRadius: BorderRadius.circular(12),
                                       child: ListTile(
-                                        title: Text(program['name'] as String),
+                                        shape: RoundedRectangleBorder(
+                                          borderRadius:
+                                              BorderRadius.circular(12),
+                                        ),
+                                        title: Text(
+                                          program['name'] as String,
+                                          style: Theme.of(context)
+                                              .textTheme
+                                              .titleMedium
+                                              ?.copyWith(
+                                                color: colorScheme.surface,
+                                                fontWeight: FontWeight.w700,
+                                              ),
+                                        ),
                                         subtitle: Text(
                                           'Tap to start or edit days',
                                           style: Theme.of(context)
                                               .textTheme
                                               .bodySmall
                                               ?.copyWith(
-                                                color: Theme.of(context)
-                                                    .colorScheme
-                                                    .onSurface
-                                                    .withValues(alpha: 0.62),
+                                                color: colorScheme.surface
+                                                    .withValues(alpha: 0.86),
                                                 fontSize: 12,
                                               ),
                                         ),
                                         onTap: () async {
                                           await Navigator.of(context).push(
                                             MaterialPageRoute(
-                                                builder: (_) => DayPickerScreen(
-                                                    programId: id)),
+                                              builder: (_) => DayPickerScreen(
+                                                  programId: id),
+                                            ),
                                           );
                                           await _syncActiveSessionBanner();
                                           if (!mounted) return;
                                           setState(() {});
                                         },
                                         trailing: PopupMenuButton<String>(
+                                          iconColor: colorScheme.surface,
                                           onSelected: (value) async {
                                             if (value == 'edit') {
                                               final saved =
@@ -1279,7 +1238,8 @@ class _ProgramsScreenState extends State<ProgramsScreen>
                                                 MaterialPageRoute(
                                                   builder: (_) =>
                                                       ProgramEditorScreen(
-                                                          programId: id),
+                                                    programId: id,
+                                                  ),
                                                 ),
                                               );
                                               if (!mounted) return;
@@ -1294,7 +1254,8 @@ class _ProgramsScreenState extends State<ProgramsScreen>
                                                 builder: (context) {
                                                   return AlertDialog(
                                                     title: const Text(
-                                                        'Delete program?'),
+                                                      'Delete program?',
+                                                    ),
                                                     content: const Text(
                                                       'This removes the program and its days. Sessions remain in history.',
                                                     ),
@@ -1302,18 +1263,20 @@ class _ProgramsScreenState extends State<ProgramsScreen>
                                                       TextButton(
                                                         onPressed: () =>
                                                             Navigator.of(
-                                                                    context)
-                                                                .pop(false),
+                                                          context,
+                                                        ).pop(false),
                                                         child: const Text(
-                                                            'Cancel'),
+                                                          'Cancel',
+                                                        ),
                                                       ),
                                                       ElevatedButton(
                                                         onPressed: () =>
                                                             Navigator.of(
-                                                                    context)
-                                                                .pop(true),
+                                                          context,
+                                                        ).pop(true),
                                                         child: const Text(
-                                                            'Delete'),
+                                                          'Delete',
+                                                        ),
                                                       ),
                                                     ],
                                                   );
@@ -1328,11 +1291,13 @@ class _ProgramsScreenState extends State<ProgramsScreen>
                                           },
                                           itemBuilder: (_) => const [
                                             PopupMenuItem(
-                                                value: 'edit',
-                                                child: Text('Edit')),
+                                              value: 'edit',
+                                              child: Text('Edit'),
+                                            ),
                                             PopupMenuItem(
-                                                value: 'delete',
-                                                child: Text('Delete')),
+                                              value: 'delete',
+                                              child: Text('Delete'),
+                                            ),
                                           ],
                                         ),
                                       ),

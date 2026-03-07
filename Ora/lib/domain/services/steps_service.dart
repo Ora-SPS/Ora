@@ -11,6 +11,7 @@ import '../../data/db/db.dart';
 import '../../data/repositories/profile_repo.dart';
 import '../../diagnostics/diagnostics_log.dart';
 import '../models/manual_treadmill_entry.dart';
+import 'fitbit_service.dart';
 import 'treadmill_calorie_estimator.dart';
 
 enum StepsAccessState {
@@ -90,10 +91,17 @@ class _TrackedHealthDayData {
   final double? calories;
 }
 
+enum _TrackedStepsSource {
+  none,
+  health,
+  fitbit,
+}
+
 class StepsService extends ChangeNotifier {
   StepsService(AppDatabase db)
       : _profileRepo = ProfileRepo(db),
         _health = Health(),
+        _fitbitService = FitbitService(),
         _estimator = TreadmillCalorieEstimator();
 
   static const int _defaultGoalSteps = 10000;
@@ -117,6 +125,7 @@ class StepsService extends ChangeNotifier {
 
   final ProfileRepo _profileRepo;
   final Health _health;
+  final FitbitService _fitbitService;
   final TreadmillCalorieEstimator _estimator;
 
   SharedPreferences? _prefs;
@@ -145,6 +154,7 @@ class StepsService extends ChangeNotifier {
   String? _statusMessage;
   DateTime? _lastDisplayedStepsAt;
   int? _lastDisplayedStepsTotal;
+  _TrackedStepsSource _trackedSource = _TrackedStepsSource.none;
 
   StepsAccessState get accessState => _accessState;
   bool get isLoading => _isLoading;
@@ -155,6 +165,21 @@ class StepsService extends ChangeNotifier {
   bool get showPermissionCta => !isPermissionGranted;
   bool get shouldShowFirstRunPrompt => _shouldShowFirstRunPrompt;
   String? get statusMessage => _statusMessage;
+  bool get usesTrackerLinkFlow => _isAndroid;
+  String get lockedStateTitle =>
+      _isAndroid ? 'Link step tracker' : 'Enable step access';
+  String get lockedStateActionLabel => _isAndroid ? 'Link tracker' : 'Enable';
+  String get lockedStateDescription {
+    final message = _statusMessage;
+    if (message != null && message.trim().isNotEmpty) {
+      return message;
+    }
+    if (_isAndroid) {
+      return 'Link Fitbit or another tracker via Health Connect to show your steps and progress.';
+    }
+    return 'Allow access to show your steps and progress.';
+  }
+
   int get healthTrackedStepsToday => _trackedStepsToday;
   int? get liveTrackedStepsToday => _liveTrackedStepsToday;
   int get effectiveTrackedStepsToday =>
@@ -239,7 +264,8 @@ class StepsService extends ChangeNotifier {
   double get distanceToday => estimatedDistanceKm / 1.609344;
   int get durationTodayMinutes => totalDurationMinutesToday.round();
   double get goalEstimatedCalories => _estimateFlatStepCalories(_goalSteps);
-  double get goalDistanceToday => _estimator.estimateDistanceKm(_goalSteps) / 1.609344;
+  double get goalDistanceToday =>
+      _estimator.estimateDistanceKm(_goalSteps) / 1.609344;
   int get goalDurationTodayMinutes =>
       _estimateFlatStepDurationMinutes(_goalSteps).round();
 
@@ -255,6 +281,9 @@ class StepsService extends ChangeNotifier {
   Future<int> getTrackedStepsForDay(DateTime day) async {
     if (!_isMobilePlatform || !isPermissionGranted) return 0;
     try {
+      if (_trackedSource == _TrackedStepsSource.fitbit) {
+        return await _fitbitService.getStepsForDay(day) ?? 0;
+      }
       await _ensureHealthConfigured();
       final tracked = await _loadTrackedHealthDataForDay(day);
       return tracked.steps;
@@ -262,7 +291,8 @@ class StepsService extends ChangeNotifier {
       DiagnosticsLog.instance.recordError(
         error,
         stackTrace,
-        context: 'getTrackedStepsForDay(${_normalizeDay(day).toIso8601String()}) failed',
+        context:
+            'getTrackedStepsForDay(${_normalizeDay(day).toIso8601String()}) failed',
       );
       return 0;
     }
@@ -271,6 +301,9 @@ class StepsService extends ChangeNotifier {
   Future<double?> getTrackedCaloriesForDay(DateTime day) async {
     if (!_isMobilePlatform || !isPermissionGranted) return null;
     try {
+      if (_trackedSource == _TrackedStepsSource.fitbit) {
+        return null;
+      }
       await _ensureHealthConfigured();
       final tracked = await _loadTrackedHealthDataForDay(day);
       return tracked.calories;
@@ -313,6 +346,16 @@ class StepsService extends ChangeNotifier {
     }
 
     try {
+      if (_trackedSource == _TrackedStepsSource.fitbit) {
+        final trackedSteps =
+            await _fitbitService.getStepsForDay(normalizedDay) ?? 0;
+        return _buildDayView(
+          day: normalizedDay,
+          trackedSteps: trackedSteps,
+          trackedCalories: null,
+          manualEntries: manualEntries,
+        );
+      }
       await _ensureHealthConfigured();
       final tracked = await _loadTrackedHealthDataForDay(normalizedDay);
       return _buildDayView(
@@ -331,13 +374,24 @@ class StepsService extends ChangeNotifier {
     }
   }
 
-  String get accessPrompt => switch (_accessState) {
-        StepsAccessState.unavailable => 'Enable step access',
-        StepsAccessState.denied => 'Enable step access',
-        StepsAccessState.needsPermission => 'Enable step access',
+  String get accessPrompt {
+    if (_isAndroid) {
+      return switch (_accessState) {
         StepsAccessState.loading => 'Loading steps',
         StepsAccessState.available => 'Step access enabled',
+        StepsAccessState.unavailable => 'Link step tracker',
+        StepsAccessState.denied => 'Link step tracker',
+        StepsAccessState.needsPermission => 'Link step tracker',
       };
+    }
+    return switch (_accessState) {
+      StepsAccessState.unavailable => 'Enable step access',
+      StepsAccessState.denied => 'Enable step access',
+      StepsAccessState.needsPermission => 'Enable step access',
+      StepsAccessState.loading => 'Loading steps',
+      StepsAccessState.available => 'Step access enabled',
+    };
+  }
 
   Future<void> initialize() async {
     if (_initialized) return;
@@ -400,32 +454,35 @@ class StepsService extends ChangeNotifier {
     try {
       DiagnosticsLog.instance.record('StepsService.refresh() begin');
       if (_isAndroid) {
-        await _ensureHealthConfigured();
-        final isAvailable = await _health.isHealthConnectAvailable();
-        if (!isAvailable) {
+        final refreshedFromHealth = await _tryRefreshFromAndroidHealthConnect();
+        if (refreshedFromHealth) {
+          return;
+        }
+        final fitbitLinked = await _fitbitService.hasLinkedAccount();
+        if (fitbitLinked) {
+          final fitbitRefreshed = await _refreshFromFitbit();
+          if (fitbitRefreshed) {
+            return;
+          }
           _setLockedState(
-            state: StepsAccessState.unavailable,
-            message: 'Install Health Connect to enable steps.',
+            state: StepsAccessState.denied,
+            message:
+                'Unable to sync Fitbit steps right now. Link Fitbit again.',
           );
           return;
         }
-        final hasPermissions = await _health.hasPermissions(
-          _healthTypes,
-          permissions: _healthPermissions,
+        _setLockedState(
+          state: _hasAskedForPermission
+              ? StepsAccessState.denied
+              : StepsAccessState.needsPermission,
+          message:
+              'Link Fitbit or install Health Connect to unlock this section.',
         );
-        if (hasPermissions != true) {
-          _setLockedState(
-            state: _hasAskedForPermission
-                ? StepsAccessState.denied
-                : StepsAccessState.needsPermission,
-            message: 'Allow step access to unlock this section.',
-          );
-          return;
-        }
+        return;
       } else if (_isIOS && !_hasAskedForPermission) {
         _setLockedState(
           state: StepsAccessState.needsPermission,
-          message: 'Allow step access to unlock this section.',
+          message: _permissionPromptMessage(),
         );
         return;
       } else {
@@ -463,6 +520,16 @@ class StepsService extends ChangeNotifier {
     _isLoading = true;
     notifyListeners();
     try {
+      if (_trackedSource == _TrackedStepsSource.fitbit) {
+        final refreshed = await _refreshFromFitbit();
+        if (!refreshed) {
+          _setLockedState(
+            state: StepsAccessState.denied,
+            message: 'Unable to sync Fitbit steps right now.',
+          );
+        }
+        return;
+      }
       await _ensureHealthConfigured();
       await _loadTrackedHealthData();
       _syncLiveTrackedFloorToHealth(source: 'refreshHealthTotalsForToday');
@@ -482,6 +549,67 @@ class StepsService extends ChangeNotifier {
       _trackedCaloriesToday = null;
     } finally {
       _isLoading = false;
+      notifyListeners();
+    }
+  }
+
+  Future<bool> isFitbitClientConfigured() async {
+    return _fitbitService.isConfigured();
+  }
+
+  Future<String?> getFitbitClientId() async {
+    return _fitbitService.getConfiguredClientId();
+  }
+
+  Future<void> setFitbitClientId(String? clientId) async {
+    await _fitbitService.setClientId(clientId);
+  }
+
+  Future<bool> linkFitbitTracker() async {
+    if (!_isAndroid) {
+      return false;
+    }
+    if (_isRequestingAccess) {
+      return isPermissionGranted;
+    }
+    _isRequestingAccess = true;
+    _hasAskedForPermission = true;
+    _shouldShowFirstRunPrompt = false;
+    notifyListeners();
+    try {
+      _prefs ??= await SharedPreferences.getInstance();
+      await _prefs?.setBool(_hasAskedPermissionKey, true);
+      final result = await _fitbitService.linkAccount();
+      if (!result.success) {
+        _setLockedState(
+          state: StepsAccessState.denied,
+          message: result.message ?? 'Unable to link Fitbit right now.',
+        );
+        return false;
+      }
+      final refreshed = await _refreshFromFitbit();
+      if (!refreshed) {
+        _setLockedState(
+          state: StepsAccessState.denied,
+          message:
+              'Fitbit linked, but we could not sync steps yet. Try again in a moment.',
+        );
+        return false;
+      }
+      return true;
+    } catch (error, stackTrace) {
+      DiagnosticsLog.instance.recordError(
+        error,
+        stackTrace,
+        context: 'StepsService.linkFitbitTracker() failed',
+      );
+      _setLockedState(
+        state: StepsAccessState.denied,
+        message: 'Unable to link Fitbit right now.',
+      );
+      return false;
+    } finally {
+      _isRequestingAccess = false;
       notifyListeners();
     }
   }
@@ -510,7 +638,8 @@ class StepsService extends ChangeNotifier {
           await _health.installHealthConnect();
           _setLockedState(
             state: StepsAccessState.unavailable,
-            message: 'Install Health Connect, then tap Enable again.',
+            message:
+                'Install Health Connect, then link Fitbit or another tracker.',
           );
           return false;
         }
@@ -523,7 +652,7 @@ class StepsService extends ChangeNotifier {
       if (!granted) {
         _setLockedState(
           state: StepsAccessState.denied,
-          message: 'Step access is currently disabled.',
+          message: _accessDisabledMessage(),
         );
         return false;
       }
@@ -557,7 +686,9 @@ class StepsService extends ChangeNotifier {
   }
 
   Future<void> startLiveTrackingIfAllowed() async {
-    if (!_isMobilePlatform || !isPermissionGranted) {
+    if (!_isMobilePlatform ||
+        !isPermissionGranted ||
+        _trackedSource != _TrackedStepsSource.health) {
       stopLiveTracking();
       return;
     }
@@ -908,7 +1039,7 @@ class StepsService extends ChangeNotifier {
   Future<void> _refreshLiveAlignment({
     String reason = 'periodic',
   }) async {
-    if (!isPermissionGranted) {
+    if (!isPermissionGranted || _trackedSource != _TrackedStepsSource.health) {
       return;
     }
     try {
@@ -1060,10 +1191,61 @@ class StepsService extends ChangeNotifier {
     notifyListeners();
   }
 
+  Future<bool> _tryRefreshFromAndroidHealthConnect() async {
+    if (!_isAndroid) {
+      return false;
+    }
+    try {
+      await _ensureHealthConfigured();
+      final isAvailable = await _health.isHealthConnectAvailable();
+      if (!isAvailable) {
+        return false;
+      }
+      final hasPermissions = await _health.hasPermissions(
+        _healthTypes,
+        permissions: _healthPermissions,
+      );
+      if (hasPermissions != true) {
+        return false;
+      }
+      await _loadTrackedHealthData();
+      _syncLiveTrackedFloorToHealth(source: 'refresh');
+      unawaited(startLiveTrackingIfAllowed());
+      _reconcileBaselineWithHealth(
+        healthSteps: _trackedStepsToday,
+        source: 'refresh',
+      );
+      _logLiveSnapshot('onResume', checkJump: true);
+      return true;
+    } catch (error, stackTrace) {
+      DiagnosticsLog.instance.recordError(
+        error,
+        stackTrace,
+        context: 'Android Health Connect refresh check failed',
+      );
+      return false;
+    }
+  }
+
+  Future<bool> _refreshFromFitbit() async {
+    final steps = await _fitbitService.getStepsForDay(DateTime.now());
+    if (steps == null) {
+      return false;
+    }
+    stopLiveTracking();
+    _trackedStepsToday = steps;
+    _trackedCaloriesToday = null;
+    _trackedSource = _TrackedStepsSource.fitbit;
+    _accessState = StepsAccessState.available;
+    _statusMessage = 'Synced from Fitbit.';
+    return true;
+  }
+
   Future<void> _loadTrackedHealthData() async {
     final tracked = await _loadTrackedHealthDataForDay(DateTime.now());
     _trackedStepsToday = tracked.steps;
     _trackedCaloriesToday = tracked.calories;
+    _trackedSource = _TrackedStepsSource.health;
     _accessState = StepsAccessState.available;
     _statusMessage = null;
   }
@@ -1318,6 +1500,7 @@ class StepsService extends ChangeNotifier {
       stopLiveTracking();
       _trackedStepsToday = 0;
       _trackedCaloriesToday = null;
+      _trackedSource = _TrackedStepsSource.health;
       _accessState = StepsAccessState.available;
       _statusMessage =
           'Health data is temporarily unavailable. Unlock the device and try again.';
@@ -1327,8 +1510,8 @@ class StepsService extends ChangeNotifier {
     final message = _isHealthDataTemporarilyUnavailable(error)
         ? 'Health data is temporarily unavailable. Unlock the device and try again.'
         : whileRequestingAccess
-              ? 'Step access is currently disabled.'
-              : 'Allow step access to unlock this section.';
+            ? _accessDisabledMessage()
+            : _permissionPromptMessage();
     _setLockedState(
       state: whileRequestingAccess || _hasAskedForPermission
           ? StepsAccessState.denied
@@ -1359,8 +1542,23 @@ class StepsService extends ChangeNotifier {
     stopLiveTracking();
     _trackedStepsToday = 0;
     _trackedCaloriesToday = null;
+    _trackedSource = _TrackedStepsSource.none;
     _accessState = state;
     _statusMessage = message;
+  }
+
+  String _permissionPromptMessage() {
+    if (_isAndroid) {
+      return 'Link Fitbit or another tracker via Health Connect to unlock this section.';
+    }
+    return 'Allow step access to unlock this section.';
+  }
+
+  String _accessDisabledMessage() {
+    if (_isAndroid) {
+      return 'Step tracker access is currently disabled.';
+    }
+    return 'Step access is currently disabled.';
   }
 
   bool _matchesEntry(

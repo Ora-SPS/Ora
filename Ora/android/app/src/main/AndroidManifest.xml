@@ -32,6 +32,14 @@
             <intent-filter>
                 <action android:name="androidx.health.ACTION_SHOW_PERMISSIONS_RATIONALE" />
             </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data
+                    android:scheme="orafitbit"
+                    android:host="auth" />
+            </intent-filter>
         </activity>
         <activity-alias
             android:name="ViewPermissionUsageActivity"

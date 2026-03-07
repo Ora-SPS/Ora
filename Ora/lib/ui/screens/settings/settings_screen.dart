@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../../../data/db/db.dart';
 import '../../../data/repositories/settings_repo.dart';
+import '../../../domain/services/fitbit_service.dart';
 import '../../../diagnostics/diagnostics_page.dart';
 import '../../widgets/glass/glass_background.dart';
 import '../../widgets/glass/glass_card.dart';
@@ -34,6 +35,7 @@ class SettingsContent extends StatefulWidget {
 
 class _SettingsContentState extends State<SettingsContent> {
   late final SettingsRepo _settingsRepo;
+  late final FitbitService _fitbitService;
   bool _loading = true;
 
   String _unit = 'lb';
@@ -46,6 +48,7 @@ class _SettingsContentState extends State<SettingsContent> {
   final _incrementController = TextEditingController();
   final _restController = TextEditingController();
   final _cloudKeyController = TextEditingController();
+  final _fitbitClientIdController = TextEditingController();
 
   final Map<CloudModelTask, String> _taskModels = {};
 
@@ -55,6 +58,7 @@ class _SettingsContentState extends State<SettingsContent> {
   void initState() {
     super.initState();
     _settingsRepo = SettingsRepo(AppDatabase.instance);
+    _fitbitService = FitbitService();
     _load();
   }
 
@@ -63,6 +67,7 @@ class _SettingsContentState extends State<SettingsContent> {
     _incrementController.dispose();
     _restController.dispose();
     _cloudKeyController.dispose();
+    _fitbitClientIdController.dispose();
     super.dispose();
   }
 
@@ -76,6 +81,7 @@ class _SettingsContentState extends State<SettingsContent> {
     final cloudProvider = await _settingsRepo.getCloudProvider();
     final orbHidden = await _settingsRepo.getOrbHidden();
     final snackbarHighContrast = await _settingsRepo.getSnackbarHighContrast();
+    final fitbitClientId = await _fitbitService.getConfiguredClientId();
 
     final taskModels = <CloudModelTask, String>{};
     for (final task in SettingsRepo.configurableCloudModelTasks) {
@@ -94,6 +100,7 @@ class _SettingsContentState extends State<SettingsContent> {
       _cloudProvider = cloudProvider;
       _orbHidden = orbHidden;
       _snackbarHighContrast = snackbarHighContrast;
+      _fitbitClientIdController.text = fitbitClientId ?? '';
       _taskModels
         ..clear()
         ..addAll(taskModels);
@@ -163,6 +170,36 @@ class _SettingsContentState extends State<SettingsContent> {
     if (!mounted) return;
     messenger.showSnackBar(
       const SnackBar(content: Text('API key cleared.')),
+    );
+  }
+
+  Future<void> _saveFitbitClientId() async {
+    final messenger = ScaffoldMessenger.of(context);
+    final trimmed = _fitbitClientIdController.text.trim();
+    await _fitbitService.setClientId(trimmed);
+    _fitbitClientIdController.value = TextEditingValue(
+      text: trimmed,
+      selection: TextSelection.collapsed(offset: trimmed.length),
+    );
+    if (!mounted) return;
+    messenger.showSnackBar(
+      SnackBar(
+        content: Text(
+          trimmed.isEmpty
+              ? 'Fitbit Client ID cleared.'
+              : 'Fitbit Client ID saved.',
+        ),
+      ),
+    );
+  }
+
+  Future<void> _clearFitbitClientId() async {
+    final messenger = ScaffoldMessenger.of(context);
+    await _fitbitService.setClientId(null);
+    _fitbitClientIdController.clear();
+    if (!mounted) return;
+    messenger.showSnackBar(
+      const SnackBar(content: Text('Fitbit Client ID cleared.')),
     );
   }
 
@@ -378,6 +415,54 @@ class _SettingsContentState extends State<SettingsContent> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
+              Row(
+                children: [
+                  const Expanded(child: Text('Step Tracker (Fitbit)')),
+                  IconButton(
+                    icon: const Icon(Icons.info_outline),
+                    onPressed: _showFitbitSetupInfo,
+                  ),
+                ],
+              ),
+              const SizedBox(height: 8),
+              const Text(
+                'Used by Link Fitbit in Training/Fitness. Enter only the Fitbit Client ID.',
+              ),
+              const SizedBox(height: 8),
+              TextField(
+                controller: _fitbitClientIdController,
+                decoration: const InputDecoration(
+                  labelText: 'Fitbit Client ID',
+                ),
+                autocorrect: false,
+                enableSuggestions: false,
+                onSubmitted: (_) => _saveFitbitClientId(),
+              ),
+              const SizedBox(height: 8),
+              Row(
+                children: [
+                  TextButton.icon(
+                    onPressed: _clearFitbitClientId,
+                    icon: const Icon(Icons.delete_outline),
+                    label: const Text('Clear'),
+                  ),
+                  const Spacer(),
+                  ElevatedButton.icon(
+                    onPressed: _saveFitbitClientId,
+                    icon: const Icon(Icons.save),
+                    label: const Text('Save'),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 12),
+        GlassCard(
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
               const Text('Voice'),
               const SizedBox(height: 8),
               SwitchListTile(
@@ -551,6 +636,39 @@ class _SettingsContentState extends State<SettingsContent> {
         return AlertDialog(
           title: Text(title),
           content: Text(body),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: const Text('OK'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  void _showFitbitSetupInfo() {
+    const body = 'How to set up Fitbit linking:\n'
+        '1) Open https://dev.fitbit.com/apps in a browser and sign in.\n'
+        '2) Click "Register an App" (or open your existing app).\n'
+        '3) App type: choose "Personal".\n'
+        '4) OAuth 2.0 settings: add Redirect URL exactly as:\n'
+        '   orafitbit://auth\n'
+        '5) Save the app.\n'
+        '6) Copy the "Client ID" from the app details.\n'
+        '7) Paste it in this field and tap Save.\n\n'
+        'Important:\n'
+        '- Do not paste your profile/user ID.\n'
+        '- Do not paste the Client Secret.\n'
+        '- If linking fails, clear this field and re-enter the Client ID.';
+    showDialog<void>(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          title: const Text('Fitbit setup'),
+          content: const SingleChildScrollView(
+            child: Text(body),
+          ),
           actions: [
             TextButton(
               onPressed: () => Navigator.of(context).pop(),

@@ -3,11 +3,13 @@
 #
 
 list(APPEND FLUTTER_PLUGIN_LIST
+  desktop_webview_window
   file_selector_linux
   flutter_secure_storage_linux
   record_linux
   url_launcher_linux
   vosk_flutter
+  window_to_front
 )
 
 list(APPEND FLUTTER_FFI_PLUGIN_LIST

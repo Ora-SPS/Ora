@@ -11,10 +11,12 @@ class StepsSummaryCard extends StatelessWidget {
     super.key,
     required this.stepsService,
     required this.onOpenDetails,
+    required this.onRequestAccess,
   });
 
   final StepsService stepsService;
   final VoidCallback onOpenDetails;
+  final Future<void> Function() onRequestAccess;
 
   @override
   Widget build(BuildContext context) {
@@ -161,14 +163,14 @@ class StepsSummaryCard extends StatelessWidget {
                         color:
                             theme.colorScheme.surface.withValues(alpha: 0.34),
                         border: Border.all(
-                          color: theme.colorScheme.outline
-                              .withValues(alpha: 0.18),
+                          color:
+                              theme.colorScheme.outline.withValues(alpha: 0.18),
                         ),
                       ),
                       child: Icon(
                         Icons.directions_walk_rounded,
-                        color: theme.colorScheme.onSurface
-                            .withValues(alpha: 0.62),
+                        color:
+                            theme.colorScheme.onSurface.withValues(alpha: 0.62),
                         size: 20,
                       ),
                     ),
@@ -179,14 +181,14 @@ class StepsSummaryCard extends StatelessWidget {
                         mainAxisSize: MainAxisSize.min,
                         children: [
                           Text(
-                            'Enable step access',
+                            stepsService.lockedStateTitle,
                             style: theme.textTheme.titleMedium?.copyWith(
                               fontWeight: FontWeight.w800,
                             ),
                           ),
                           const SizedBox(height: 2),
                           Text(
-                            'Allow access to show your steps and progress.',
+                            stepsService.lockedStateDescription,
                             style: labelStyle,
                           ),
                         ],
@@ -196,13 +198,13 @@ class StepsSummaryCard extends StatelessWidget {
                       onPressed: stepsService.isLoading ||
                               stepsService.isRequestingAccess
                           ? null
-                          : stepsService.requestAccess,
+                          : () => onRequestAccess(),
                       style: TextButton.styleFrom(
                         minimumSize: const Size(44, 44),
                         padding: const EdgeInsets.symmetric(horizontal: 12),
                         tapTargetSize: MaterialTapTargetSize.shrinkWrap,
                       ),
-                      child: const Text('Enable'),
+                      child: Text(stepsService.lockedStateActionLabel),
                     ),
                   ],
                 ),
